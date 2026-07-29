@@ -1,0 +1,15 @@
+# Креды Omni API
+.env
+
+# Дисковый кэш ответов API (содержит клиентские сообщения) и артефакты тестов
+scripts/cache/
+scripts/__pycache__/
+__pycache__/
+scripts/*.log
+*.log
+
+# Локальные прогоны/вывод отчётов
+*_report.json
+*_render.md
+*_err.txt
+*.html
