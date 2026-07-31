@@ -8,6 +8,10 @@ __pycache__/
 scripts/*.log
 *.log
 
+# Настройки калибровочной грации — содержат ваши группы и решения по ним.
+# В репозитории лежит только calibration.example.json.
+scripts/calibration.json
+
 # Локальные прогоны/вывод отчётов
 *_report.json
 *_render.md

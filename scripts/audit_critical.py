@@ -161,6 +161,9 @@ def audit_case(client, case):
         "case_id": cid,
         "staff": case["staff"],
         "first_response_min": case["first_response_min"],
+        # Направление обращения — нужно калибровочной грации (calibration.py),
+        # чтобы отделить нарушения молодых продуктов от обычных.
+        "group_id": case.get("group_id"),
         "borderline": False,
     }
 

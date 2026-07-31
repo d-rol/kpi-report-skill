@@ -271,8 +271,13 @@ def _render_manager(r):
 
     if clear:
         rows = "".join(_case_row(r, v) for v in clear)
+        # Иначе «личных критичных 4» в полосе против 2 строк в таблице читается как ошибка.
+        split = (f"<p class=hint>Показаны {len(clear)} из {len(personal)} личных критичных; "
+                 f"остальные {len(border)} — ниже, в «Требует вашей оценки».</p>"
+                 if border else "")
         parts.append(
             "<div class=card><h2>Личные критичные — смотреть сюда</h2>"
+            f"{split}"
             "<table><thead><tr><th>Обращение</th><th class=num>Первый ответ</th>"
             "<th class=num>Держал</th><th>Что было</th></tr></thead>"
             f"<tbody>{rows}</tbody></table></div>"
@@ -305,6 +310,66 @@ def _render_manager(r):
             "<th class=num>Держал</th><th>Источник</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>{more}</details></div>"
         )
+
+    # Калибровочная грация — только если в периоде реально были молодые
+    # направления, иначе лишний блок в каждом отчёте.
+    cal = r.get("calibration") or {}
+    if cal.get("groups_in_grace"):
+        chips = "".join(
+            f"<li><b>{_esc(g['title'])}</b> — {g['age_days']:.0f} дн "
+            f"(создана {_esc(g['created_at'])})</li>"
+            for g in cal["groups_in_grace"])
+        rows = "".join(
+            f"<tr><td>#{_esc(c['case_number'])}</td><td>{_esc(c['group'])}</td>"
+            f"<td class=num>{_esc(c['first_response_min'])} мин</td></tr>"
+            for c in sorted(cal.get("cases", []),
+                            key=lambda x: -x["first_response_min"])[:15])
+        more = (f"<p class=hint>…и ещё {len(cal['cases']) - 15} "
+                "(полный список — флаг --json).</p>"
+                if len(cal.get("cases", [])) > 15 else "")
+        parts.append(
+            "<div class=card><h2>Калибровочная грация "
+            f"<span class='pill warn'>&lt; {_esc(cal['grace_weeks'])} нед</span></h2>"
+            "<p class=hint>Направления моложе окна грации на конец периода. Метрики по ним "
+            "ещё не показательны: нет шаблонов и базы знаний, поток непредсказуем. "
+            "Нарушения показаны, но <b>не вычтены</b> — решение за руководителем.</p>"
+            f"<ul>{chips}</ul>"
+            f"<p>Нарушений SLA из этих направлений: <b>{_esc(cal['violations_from_grace'])}</b>, "
+            f"из них личных критичных: <b>{_esc(cal['personal_critical_from_grace'])}</b>.</p>"
+            + (("<table><thead><tr><th>Обращение</th><th>Направление</th>"
+                "<th class=num>Первый ответ</th></tr></thead>"
+                f"<tbody>{rows}</tbody></table>" + more) if rows else "")
+            + "</div>"
+        )
+
+    # Забытые в работе — взяты, но первого ответа так и нет дольше N часов.
+    fw = r.get("forgotten_in_work")
+    if fw:
+        mine = fw.get("by_staff", {}).get(str(r["staff_id"]), [])
+        hrs = int(fw.get("min_age_hours", 24))
+        title = (f"<h2>Забытые в работе <span class='pill warn'>&gt; {hrs} ч</span></h2>")
+        if mine:
+            tpl = r.get("case_url_tpl")
+            rows = []
+            for w in sorted(mine, key=lambda x: -x["age_hours"]):
+                num = _esc(w["case_number"])
+                cell = (f"<a class=case href='{_esc(tpl.format(case_number=w['case_number']))}' "
+                        f"target=_blank rel=noopener>#{num}</a>") if tpl else f"#{num}"
+                rows.append(f"<tr><td>{cell}</td><td class=num>{_esc(w['age_hours'])} ч</td>"
+                            f"<td>{_esc(w.get('subject') or '')}</td></tr>")
+            parts.append(
+                f"<div class=card>{title}"
+                "<p class=hint>Обращение уже взято этим сотрудником (есть ответственный), "
+                "но первого ответа так и нет. В SLA пока не попадает — висит незамеченным.</p>"
+                "<table><thead><tr><th>Обращение</th><th class=num>Висит</th>"
+                "<th>Тема</th></tr></thead>"
+                f"<tbody>{''.join(rows)}</tbody></table></div>"
+            )
+        else:
+            parts.append(
+                f"<div class=card>{title}<p class=hint>У сотрудника таких нет. "
+                f"По команде всего: <b>{_esc(fw.get('total', 0))}</b>.</p></div>"
+            )
 
     # Команда: без ответственного.
     team = r.get("team_no_responsible")

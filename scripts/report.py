@@ -32,11 +32,13 @@
 import sys
 import json
 import argparse
+import datetime as dt
 
 from omni_client import OmniClient
 from sla_violations import parse_speed, classify
 from audit_critical import audit_case
 from no_responsible import live_snapshot, period_breakdown, forgotten_in_work
+from calibration import grace_status, load_config, MSK, FMT as CAL_FMT
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -93,6 +95,8 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
             "case_id": case.get("case_id"),
             "staff": staff_name,
             "first_response_min": round(spd, 1),
+            # Нужен для калибровочной грации: из какого направления обращение.
+            "group_id": case.get("group_id"),
         })
 
     # 3) Аудит критичных этого сотрудника: личное vs унаследованное.
@@ -147,6 +151,12 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
         "inherited_critical_cases": inherited,
         "case_url_tpl": f"https://{client.subdomain}.omnidesk.ru/staff/cases/record/{{case_number}}",
     }
+    # 4) Калибровочная грация: были ли в периоде молодые направления и сколько
+    # нарушений пришло из них. Возраст групп считаем на КОНЕЦ периода, иначе
+    # старый отчёт, пересобранный позже, потеряет грацию и перестанет сходиться.
+    result["calibration"] = calibration_block(
+        client, from_time, to_time, buckets["light"] + buckets["critical"], personal)
+
     if want_team:
         result["team_no_responsible"] = {
             "live": live_snapshot(client),
@@ -154,6 +164,42 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
         }
         result["forgotten_in_work"] = forgotten_in_work(client)
     return result
+
+
+def calibration_block(client, from_time, to_time, all_violations, personal_critical):
+    """Молодые направления периода + сколько нарушений пришло именно из них.
+
+    Ничего не вычитает: грация — это пометка «здесь метрика ещё не показательна»,
+    а не автоматическая амнистия. Решение остаётся за руководителем (правила
+    pass/fail в проекте сознательно нет).
+    """
+    try:
+        at = dt.datetime.strptime(to_time, CAL_FMT).replace(tzinfo=MSK)
+    except (TypeError, ValueError):
+        at = None
+    status = grace_status(client, at=at, cfg=load_config())
+    graced = {gid for gid, g in status["groups"].items() if g["in_grace"]}
+    block = {
+        "grace_weeks": status["grace_weeks"],
+        "evaluated_at": status["at"],
+        "groups_in_grace": [status["groups"][g] for g in sorted(graced)],
+        "violations_from_grace": 0,
+        "personal_critical_from_grace": 0,
+        "cases": [],
+    }
+    if not graced:
+        return block
+    hit = [c for c in all_violations if c.get("group_id") in graced]
+    titles = {gid: status["groups"][gid]["title"] for gid in graced}
+    block["violations_from_grace"] = len(hit)
+    block["personal_critical_from_grace"] = sum(
+        1 for c in personal_critical if c.get("group_id") in graced)
+    block["cases"] = [{
+        "case_number": c["case_number"],
+        "group": titles.get(c.get("group_id")),
+        "first_response_min": c["first_response_min"],
+    } for c in hit]
+    return block
 
 
 def fmt_min(v):
@@ -270,6 +316,21 @@ def render_manager(r):
         if len(inh) > 12:
             out.append(f"\n…и ещё {len(inh) - 12} (полный список — флаг `--json`).")
         out.append("\n</details>")
+
+    # Калибровочная грация: показываем только когда в периоде реально были
+    # молодые направления — иначе это лишний шум в каждом отчёте.
+    cal = r.get("calibration") or {}
+    if cal.get("groups_in_grace"):
+        names = ", ".join(f"**{g['title']}** ({g['age_days']:.0f} дн)"
+                          for g in cal["groups_in_grace"])
+        out.append(f"\n### Калибровочная грация — молодые направления")
+        out.append(f"_Моложе {cal['grace_weeks']} нед на конец периода: {names}. "
+                   "Метрики по ним ещё не показательны: нет шаблонов и базы знаний, "
+                   "поток непредсказуем. Нарушения показаны, но не вычтены — "
+                   "решение за вами._")
+        out.append(f"- Нарушений SLA пришло из этих направлений: "
+                   f"**{cal['violations_from_grace']}** "
+                   f"(из них личных критичных: **{cal['personal_critical_from_grace']}**)")
 
     fw = r.get("forgotten_in_work")
     if fw:
