@@ -39,6 +39,9 @@ from sla_violations import parse_speed, classify
 from audit_critical import audit_case
 from no_responsible import live_snapshot, period_breakdown, forgotten_in_work
 from calibration import grace_status, load_config, MSK, FMT as CAL_FMT
+# Импортируем модулем, а не именами: внутри gather() локальная переменная `lb` —
+# это лидерборд, и короткий алиас молча затенил бы модуль.
+import load_baseline
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -97,12 +100,53 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
             "first_response_min": round(spd, 1),
             # Нужен для калибровочной грации: из какого направления обращение.
             "group_id": case.get("group_id"),
+            # Нужен, чтобы отметить случаи, пришедшие в час всплеска нагрузки.
+            "created_at": case.get("created_at"),
         })
 
     # 3) Аудит критичных этого сотрудника: личное vs унаследованное.
     verdicts = [audit_case(client, c) for c in buckets["critical"]]
     personal = [v for v in verdicts if v["kind"] == "personal"]
     inherited = [v for v in verdicts if v["kind"] != "personal"]
+
+    # Аудит знает только staff_id, поэтому в вердикте остаётся «передано от
+    # оператора 12345». Руководителю нужен человек, а не число — подставляем имя
+    # здесь, где справочник уже есть. Сам staff_id сохраняем в neglected_by:
+    # он машиночитаемый ключ, имя может измениться.
+    names = client.staff_map()
+    for v in verdicts:
+        nb = v.get("neglected_by")
+        if nb is None:
+            continue
+        # staff_id приходит то строкой, то числом — ищем по обоим видам ключа.
+        keys = {nb, str(nb)}
+        if str(nb).isdigit():
+            keys.add(int(nb))
+        nm = next((names[k] for k in keys if k in names), None)
+        if nm:
+            v["neglected_by_name"] = nm
+            v["reason"] = f"передано от: {nm}"
+
+    # 3.5) Контекст нагрузки: поток в этот период был обычный или нет.
+    # Только для manager: нагрузка — метрика командная, а в личном отчёте она
+    # читалась бы как заготовленное оправдание. Заодно не платим за неё те ~2
+    # минуты API, когда сотрудник смотрит свой отчёт.
+    load = None
+    if want_team:
+        load = load_baseline.context(client, from_time, to_time)
+        # Помечаем случаи, пришедшие в час всплеска. Это НЕ смягчает вердикт —
+        # решение по-прежнему за руководителем; просто рядом видно, что в этот
+        # час поток был кратно выше обычного.
+        spike_at = load.get("spike_buckets") or {}
+        for v in verdicts:
+            created = next((c.get("created_at") for c in buckets["critical"]
+                            if c["case_id"] == v.get("case_id")), None)
+            d = load_baseline.parse_created(created) if created else None
+            if d is None:
+                continue
+            ratio = spike_at.get(load_baseline.bucket_key(d.weekday(), d.hour))
+            if ratio:
+                v["spike_ratio"] = ratio
 
     # Реальный % просрочек: сырой (всё >15 мин, сходится с Омнидеском) vs
     # аудированный (унаследованное из очереди убрано). Лёгкие (15–20 мин) не
@@ -158,6 +202,7 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
         client, from_time, to_time, buckets["light"] + buckets["critical"], personal)
 
     if want_team:
+        result["load"] = load
         result["team_no_responsible"] = {
             "live": live_snapshot(client),
             "period": period_breakdown(client, from_time, to_time),
@@ -220,6 +265,17 @@ def case_link(r, v):
     return f"[#{num}]({tpl.format(case_number=num)})" if tpl else f"#{num}"
 
 
+def spike_note(v):
+    """Пометка «обращение пришло в час всплеска» — контекст, а не смягчение.
+
+    Вердикт не меняем: решение за руководителем. Но без этой пометки строка
+    «держал 40 минут» читается одинаково и в спокойный час, и в час с двойным
+    потоком, а это разные ситуации.
+    """
+    ratio = v.get("spike_ratio")
+    return f" · час всплеска x{ratio}" if ratio else ""
+
+
 def render_personal(r):
     s = r["speed"]
     sp = r["sla_percent"]
@@ -250,6 +306,38 @@ def render_personal(r):
     return "\n".join(out)
 
 
+def load_lines(load):
+    """Контекст нагрузки — одна строка, не блок таблиц.
+
+    Полная картина (профиль по часам, разбивка по дням) живёт в load_baseline.py;
+    в отчёте по одному сотруднику ей не место — иначе персональный отчёт
+    превращается в командную панель.
+    """
+    if not load:
+        return []
+    if not load.get("available"):
+        # «Базы нет» и «поток как обычно» — разные утверждения. Молчание тут
+        # прочиталось бы как второе, поэтому причину печатаем явно.
+        return [f"\n**Нагрузка:** сравнивать не с чем — {load.get('reason')}. "
+                "Проценты выше от этого не меняются, но контекста «поток был "
+                "обычный или нет» у отчёта пока нет."]
+
+    lpo = load.get("load_per_operator") or {}
+    vs_week = (load.get("vs_last_week") or {}).get("ratio")
+    parts = [f"\n**Нагрузка:** пришло {load['actual_cases']} обращений "
+             f"против обычных {load['expected_cases']} (x{load['ratio']} к среднему"]
+    if vs_week:
+        parts.append(f", x{vs_week} к последней неделе базы")
+    parts.append(f"). {lpo.get('cases_per_work_hour')} обращений/час на "
+                 f"{load['online_staff']} оператора в окно {lpo.get('work_window')}.")
+    line = "".join(parts)
+    if load.get("clipped_by_data_start"):
+        line += (f"  \n_База короткая — {load['baseline_days']} дн вместо "
+                 f"{load['baseline_weeks']} нед: раньше Омнидеск не был основным "
+                 "каналом. Сравнение ориентировочное._")
+    return [line]
+
+
 def render_manager(r):
     s, raw = r["speed"], r["sla_raw_omnidesk"]
     sla, sp = r["sla_audited"], r["sla_percent"]
@@ -278,11 +366,20 @@ def render_manager(r):
                f"Критичные **{allv['critical']} → {pers['critical']}** личных "
                f"(унаследовано из очереди {sla['critical_inherited']}).")
 
+    out.extend(load_lines(r.get("load")))
+
     personal = r["personal_critical_cases"]
     clear = sorted([v for v in personal if not v.get("borderline")],
                    key=lambda x: -x["first_response_min"])
     border = sorted([v for v in personal if v.get("borderline")],
                     key=lambda x: -x["first_response_min"])
+
+    if clear and border:
+        # Иначе руководитель читает «личных 4», считает строки в таблице ниже и
+        # видит 2 — расхождение, которого нет: пограничные тоже личные, просто
+        # вынесены отдельно, потому что вердикт по ним за ним, а не за нами.
+        out.append(f"\nИз этих **{pers['critical']}**: однозначных {len(clear)}, "
+                   f"пограничных {len(border)} — обе таблицы ниже.")
 
     if clear:
         out.append("\n### Личные критичные — смотреть сюда")
@@ -290,7 +387,8 @@ def render_manager(r):
         out.append("|---|--:|--:|---|")
         for v in clear:
             held = "—" if v.get("held_min") is None else f"{v['held_min']} мин"
-            out.append(f"| {case_link(r, v)} | {v['first_response_min']} мин | {held} | {v['reason']} |")
+            out.append(f"| {case_link(r, v)} | {v['first_response_min']} мин | {held} "
+                       f"| {v['reason']}{spike_note(v)} |")
 
     if border:
         out.append("\n### Требует вашей оценки — пограничные")
@@ -301,7 +399,7 @@ def render_manager(r):
         out.append("|---|--:|--:|---|")
         for v in border:
             held = "—" if v.get("held_min") is None else f"{v['held_min']} мин"
-            note = v["reason"] + (" · авто-чат" if v.get("auto_chat") else "")
+            note = v["reason"] + (" · авто-чат" if v.get("auto_chat") else "") + spike_note(v)
             out.append(f"| {case_link(r, v)} | {v['first_response_min']} мин | {held} | {note} |")
 
     if r["inherited_critical_cases"]:

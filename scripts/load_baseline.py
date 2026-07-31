@@ -348,6 +348,76 @@ def compare(client, from_time, to_time, baseline):
     }
 
 
+def resolve_online(client, baseline, from_time, to_time, online="auto"):
+    """Делитель нагрузки: либо число руками, либо вывести из графика смен.
+
+    Вынесено из main(), потому что этим же путём ходит report.py. Если бы каждый
+    вызывающий выводил смены сам, они разошлись бы при первой же правке порога, и
+    нагрузка в отчёте перестала бы сходиться с нагрузкой в хелпере.
+    """
+    if str(online).lower() != "auto":
+        return int(online), "задано вручную", None
+    r_from = from_time or baseline["window"]["effective_from"]
+    r_to = to_time or baseline["window"]["to"]
+    rst = shifts.roster(client, r_from, r_to)
+    avg = shifts.avg_online(rst)
+    if not avg:
+        # Смены не определились — честнее считать по одному оператору и сказать
+        # об этом, чем молча поделить на выдуманное число.
+        return 1, "график смен не определился — считаем по одному оператору", rst
+    off = sum(r["cases"] for d in rst["days"].values() for r in d["visitors"])
+    return avg, (f"из графика смен: {avg} (мимо смены закрыто {off} "
+                 "обращений — в делитель не пошли)"), rst
+
+
+def context(client, from_time, to_time, weeks=4, since=None):
+    """Компактный контекст нагрузки для отчёта: поток был обычный или нет.
+
+    Полная картина (профиль по часам, разбивка по дням) остаётся в main() — она
+    для разбора нагрузки отдельно. Отчёту по сотруднику нужна одна строка.
+
+    `available: False` — это НЕ ошибка, а честный ответ «базы пока нет»
+    (данных меньше MIN_BASELINE_DAYS). Вызывающий обязан показать причину,
+    а не подставить ноль: «поток как обычно» и «сравнивать не с чем» —
+    разные утверждения, и путать их нельзя, когда от отчёта зависят деньги.
+    """
+    end = dt.datetime.strptime(from_time, FMT).replace(tzinfo=MSK)
+    baseline = build_baseline(client, end, weeks=weeks, since=since)
+    win = baseline["window"]
+    if win["insufficient"]:
+        return {
+            "available": False,
+            "reason": ("весь период раньше начала пригодных данных"
+                       if win["collapsed"] else
+                       f"пригодных данных всего {win['effective_days']} дн "
+                       f"(нужно минимум {win['min_days']:.0f})"),
+            "data_start": win["data_start"],
+            "baseline_days": win["effective_days"],
+        }
+
+    online, online_note, _ = resolve_online(client, baseline, from_time, to_time)
+    baseline["online_staff"] = online
+    cmp_ = compare(client, from_time, to_time, baseline)
+    return {
+        "available": True,
+        "baseline_days": win["effective_days"],
+        "baseline_weeks": weeks,
+        "clipped_by_data_start": win["clipped_by_data_start"],
+        "online_staff": online,
+        "online_note": online_note,
+        "actual_cases": cmp_["actual_cases"],
+        "expected_cases": cmp_["expected_cases"],
+        "ratio": cmp_["ratio"],
+        "vs_last_week": cmp_["vs_last_week"],
+        "load_per_operator": cmp_["load_per_operator"],
+        # Ключи «Пн-14» — по ним отчёт помечает критичные случаи, попавшие
+        # в час всплеска. Формат тот же, что у bucket_key.
+        "spike_buckets": {bucket_key(WD_NAMES.index(s["weekday"]), s["hour"]): s["ratio"]
+                          for s in cmp_["spikes"]},
+        "spikes": cmp_["spikes"],
+    }
+
+
 def bar(value, peak, width=22):
     if peak <= 0:
         return ""
@@ -390,24 +460,11 @@ def main():
     # заходит закрыть сторонние задачи — если считать его сменой, нагрузка
     # основного оператора делится пополам на ровном месте. Поэтому по умолчанию
     # число операторов берём из графика смен (shifts.py), а не с потолка.
-    online_note = None
-    if str(args.online).lower() == "auto":
-        r_from = args.from_time or baseline["window"]["effective_from"]
-        r_to = args.to_time or baseline["window"]["to"]
-        rst = shifts.roster(client, r_from, r_to)
-        avg = shifts.avg_online(rst)
-        if avg:
-            baseline["online_staff"] = avg
-            off = sum(r["cases"] for d in rst["days"].values() for r in d["visitors"])
-            online_note = (f"из графика смен: {avg} (мимо смены закрыто {off} "
-                           "обращений — в делитель не пошли)")
-        else:
-            baseline["online_staff"] = 1
-            online_note = "график смен не определился — считаем по одному оператору"
+    online, online_note, rst = resolve_online(client, baseline, args.from_time,
+                                              args.to_time, args.online)
+    baseline["online_staff"] = online
+    if rst is not None:
         baseline["shifts"] = rst
-    else:
-        baseline["online_staff"] = int(args.online)
-        online_note = "задано вручную"
 
     result = {"baseline": baseline}
     if args.from_time and args.to_time and not baseline["window"]["insufficient"]:
