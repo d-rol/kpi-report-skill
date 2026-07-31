@@ -1,0 +1,305 @@
+"""Оффлайн-самопроверка хелперов: без сети, без .env, без кэша.
+
+Зачем отдельный файл. Проверить «а не сломалось ли» на живом Омнидеске дорого
+(rate limit, 20 запросов/мин) и невоспроизводимо: данные меняются, вчерашний
+эталон сегодня не сходится. Поэтому логика, которую легко сломать молча,
+проверяется на подставных данных — прогон занимает секунду и не требует доступа
+к API. Это НЕ замена сверке с живым Омнидеском, а её дешёвая нижняя граница:
+здесь ловятся регрессии в арифметике и в пограничных ветках.
+
+Что проверяем (каждый пункт — реально сломанное или почти сломанное место):
+  * ключи корзин «день недели × час» — кортеж в JSON не сериализуется, поэтому
+    наружу они уходят строками; чтение по кортежу молча вернуло бы 0;
+  * нижняя граница пригодных данных: без границы / с границей / граница позже
+    периода (окно схлопывается, и в API идти нельзя — на перевёрнутом диапазоне
+    Омнидеск отвечает 400);
+  * отказ считать базу, когда пригодных дней меньше минимума;
+  * график смен: заглянувший не считается сменой, настоящая двойная смена
+    считается, тихий день помечается ненадёжным, ручное переопределение бьёт
+    вывод из данных;
+  * калибровочная грация: авто-детект по возрасту и переопределения в обе
+    стороны.
+
+Запуск:  python scripts/selftest.py
+Код возврата 0 — всё сошлось, 1 — есть падения (годится для CI).
+"""
+import os
+import sys
+import json
+import tempfile
+import datetime as dt
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
+
+import shifts
+import calibration
+import load_baseline as lb
+
+MSK = lb.MSK
+FAILED = []
+PASSED = 0
+
+
+def check(name, got, want):
+    global PASSED
+    if got == want:
+        PASSED += 1
+        print(f"  ok   {name}")
+    else:
+        FAILED.append(name)
+        print(f"  FAIL {name}\n         получили: {got!r}\n         ожидали:  {want!r}")
+
+
+def section(title):
+    print(f"\n{title}")
+
+
+# --------------------------------------------------------------------------
+# Подставные клиенты. Отдают ровно ту форму данных, что настоящий OmniClient.
+# --------------------------------------------------------------------------
+def rfc(d):
+    """Омнидеск отдаёт created_at в RFC 2822 — подделываем в том же формате."""
+    return d.strftime("%a, %d %b %Y %H:%M:%S +0300")
+
+
+class CaseStub:
+    """Клиент с заданным списком обращений; фильтрует по окну, как настоящий."""
+
+    def __init__(self, cases):
+        self.cases = cases
+        self.calls = 0
+
+    def iter_cases(self, from_time, to_time, **kw):
+        self.calls += 1
+        s = dt.datetime.strptime(from_time, lb.FMT)
+        e = dt.datetime.strptime(to_time, lb.FMT)
+        for c in self.cases:
+            created = dt.datetime.strptime(c["_created"], lb.FMT)
+            if s <= created <= e:
+                yield {k: v for k, v in c.items() if not k.startswith("_")}
+
+    def staff_map(self):
+        return {1: "Оператор А", 2: "Оператор Б", 99: "Бот"}
+
+
+def steady_cases(start, days, per_day=4, staff_id=1):
+    """Ровный поток: per_day обращений в сутки, все с ответом.
+
+    Первое обращение суток кладём ровно в 00:00. Это не косметика: окно базы
+    начинается с ПЕРВОГО реального обращения (`effective_start`), поэтому поток,
+    стартующий в 10 утра, укоротил бы окно на 10 часов и все проверки «сколько
+    дней в базе» поехали бы на 0.4 дня.
+    """
+    out = []
+    step = 24 // per_day
+    for d in range(days):
+        for i in range(per_day):
+            t = start + dt.timedelta(days=d, hours=i * step)
+            out.append({"_created": t.strftime(lb.FMT), "created_at": rfc(t),
+                        "case_id": len(out) + 1, "staff_id": staff_id,
+                        "first_response_speed": "00:05:00"})
+    return out
+
+
+class GroupStub:
+    def __init__(self, groups):
+        self._groups = groups
+
+    def get(self, path, params=None):
+        return {str(i): {"group": g} for i, g in enumerate(self._groups)}
+
+
+# --------------------------------------------------------------------------
+section("Ключи корзин «день недели × час»")
+# --------------------------------------------------------------------------
+# Кортеж (weekday, hour) в JSON ключом не сериализуется, поэтому наружу корзины
+# уходят строками. Если round-trip сломается, per_bucket начнёт молча отдавать
+# нули, и «ожидали 0 обращений» будет выглядеть как настоящий вывод.
+check("bucket_key(0, 14) -> строка", lb.bucket_key(0, 14), "Пн-14")
+check("round-trip всех 168 корзин",
+      all(lb.parse_bucket_key(lb.bucket_key(wd, h)) == (wd, h)
+          for wd in range(7) for h in range(24)),
+      True)
+check("ключ сериализуется в JSON",
+      json.loads(json.dumps({lb.bucket_key(3, 9): 1})), {"Чт-09": 1})
+
+# --------------------------------------------------------------------------
+section("Нижняя граница пригодных данных")
+# --------------------------------------------------------------------------
+END = dt.datetime(2026, 7, 29, tzinfo=MSK)
+cases = steady_cases(dt.datetime(2026, 6, 25, tzinfo=MSK), 40)
+
+# Проверяем МЕХАНИЗМ границы, а не дату из конкретной установки. DATA_START —
+# настройка проекта: где-то None, где-то дата переезда. Без этой строчки тест
+# «без границы» в такой установке молча стал бы тестом «с границей» и перестал
+# бы проверять то, что заявлено. Границу дальше задаём явно, аргументом since.
+lb.DATA_START = None
+
+# Границы нет — берём всё окно.
+b = lb.build_baseline(CaseStub(cases), END, weeks=4)
+check("без границы: окно 28 дн", b["window"]["effective_days"], 28.0)
+check("без границы: не обрезано", b["window"]["clipped_by_data_start"], False)
+# Данные покрывают всё окно, упираться не во что.
+check("без границы: окно не подрезано по первому обращению",
+      b["window"]["truncated"], False)
+check("без границы: база годная", b["window"]["insufficient"], False)
+check("без границы: data_start отсутствует", b["window"]["data_start"], None)
+
+# Граница внутри окна — окно обрезается, дней мало, база непригодна.
+b = lb.build_baseline(CaseStub(cases), END, weeks=4,
+                      since=dt.datetime(2026, 7, 25, tzinfo=MSK))
+check("граница внутри окна: обрезано", b["window"]["clipped_by_data_start"], True)
+check("граница внутри окна: осталось 4 дн", b["window"]["effective_days"], 4.0)
+check("граница внутри окна: база непригодна (< 7 дн)",
+      b["window"]["insufficient"], True)
+
+# Граница даёт ровно минимум — база уже годится (проверяем саму границу отсечки).
+b = lb.build_baseline(CaseStub(cases), END, weeks=4,
+                      since=dt.datetime(2026, 7, 22, tzinfo=MSK))
+check("ровно 7 дн: база годная", b["window"]["insufficient"], False)
+
+# Граница позже конца окна — окно схлопывается. Главное: в API не ходим,
+# иначе Омнидеск получит from > to и ответит 400.
+stub = CaseStub(cases)
+b = lb.build_baseline(stub, dt.datetime(2026, 7, 20, tzinfo=MSK), weeks=4,
+                      since=dt.datetime(2026, 7, 25, tzinfo=MSK))
+check("окно схлопнулось: флаг collapsed", b["window"]["collapsed"], True)
+check("окно схлопнулось: база непригодна", b["window"]["insufficient"], True)
+check("окно схлопнулось: обращений нет", b["cases_total"], 0)
+check("окно схлопнулось: В API НЕ ХОДИЛИ", stub.calls, 0)
+check("окно схлопнулось: корзины пустые", b["per_bucket"], {})
+check("окно схлопнулось: JSON сериализуется",
+      isinstance(json.dumps(b, ensure_ascii=False), str), True)
+
+# --------------------------------------------------------------------------
+section("График смен")
+# --------------------------------------------------------------------------
+def day_cases(day, counts):
+    """counts = {staff_id: сколько обращений в этот день}."""
+    out = []
+    for sid, n in counts.items():
+        for i in range(n):
+            t = dt.datetime(2026, 7, day, 10, 0) + dt.timedelta(minutes=i)
+            out.append({"_created": t.strftime(lb.FMT), "created_at": rfc(t),
+                        "case_id": f"{day}-{sid}-{i}", "staff_id": sid,
+                        "first_response_speed": "00:05:00"})
+    return out
+
+
+CFG = {"share_threshold": 0.30, "min_day_cases": 10,
+       "exclude_staff": [], "overrides": {}}
+
+# Типичный день: один держит смену, второй заглянул закрыть пару задач.
+c = day_cases(6, {1: 100, 2: 8})
+r = shifts.roster(CaseStub(c), "2026-07-06 00:00:00", "2026-07-06 23:59:59", cfg=dict(CFG))
+d = r["days"]["2026-07-06"]
+check("заглянувший НЕ считается сменой", d["on_shift"], [1])
+check("заглянувший попал в visitors", [v["staff_id"] for v in d["visitors"]], [2])
+check("делитель нагрузки = 1, а не 2", shifts.avg_online(r), 1.0)
+
+# Настоящая двойная смена: механизм не должен её терять.
+c = day_cases(7, {1: 60, 2: 55})
+r = shifts.roster(CaseStub(c), "2026-07-07 00:00:00", "2026-07-07 23:59:59", cfg=dict(CFG))
+check("реальная двойная смена засчитана",
+      sorted(r["days"]["2026-07-07"]["on_shift"]), [1, 2])
+check("делитель для двойной смены = 2", shifts.avg_online(r), 2.0)
+
+# Тихий день: 3 из 5 — формально 60%, но доказывать этим нечего.
+c = day_cases(8, {1: 3, 2: 2})
+r = shifts.roster(CaseStub(c), "2026-07-08 00:00:00", "2026-07-08 23:59:59", cfg=dict(CFG))
+check("тихий день помечен ненадёжным",
+      r["days"]["2026-07-08"]["low_confidence"], True)
+check("ненадёжный день не идёт в делитель", shifts.avg_online(r), None)
+
+# Ровно на пороге: доля == порогу считается сменой (граница включительно).
+c = day_cases(9, {1: 70, 2: 30})
+r = shifts.roster(CaseStub(c), "2026-07-09 00:00:00", "2026-07-09 23:59:59", cfg=dict(CFG))
+check("доля ровно 30% = на смене",
+      sorted(r["days"]["2026-07-09"]["on_shift"]), [1, 2])
+
+# Исключённые (боты, системные учётки) не могут «выйти на смену».
+c = day_cases(10, {99: 90, 1: 20})
+cfg_ex = dict(CFG, exclude_staff=[99])
+r = shifts.roster(CaseStub(c), "2026-07-10 00:00:00", "2026-07-10 23:59:59", cfg=cfg_ex)
+check("бот исключён из смен", r["days"]["2026-07-10"]["on_shift"], [1])
+
+# Ручное переопределение бьёт вывод из данных (отпуск, подмена).
+c = day_cases(11, {1: 100, 2: 8})
+cfg_ov = dict(CFG, overrides={"2026-07-11": {
+    "on_shift": [2], "note": "подмена", "decided": "2026-07-12", "by": "рук"}})
+r = shifts.roster(CaseStub(c), "2026-07-11 00:00:00", "2026-07-11 23:59:59", cfg=cfg_ov)
+d = r["days"]["2026-07-11"]
+check("переопределение бьёт данные", d["on_shift"], [2])
+check("переопределение помечено как ручное", d["source"], "override")
+check("в примечании сохранены автор и дата решения",
+      d["note"], "подмена (решение рук, 2026-07-12)")
+check("вытесненный ушёл в visitors",
+      [v["staff_id"] for v in d["visitors"]], [1])
+
+# Отсутствие конфига — не ошибка: механизм работает на умолчаниях.
+missing = os.path.join(tempfile.gettempdir(), "нет-такого-shifts.json")
+cfg = shifts.load_config(missing)
+check("без конфига берутся умолчания",
+      (cfg["share_threshold"], cfg["overrides"]), (shifts.DEFAULT_SHARE, {}))
+
+# --------------------------------------------------------------------------
+section("Калибровочная грация")
+# --------------------------------------------------------------------------
+AT = dt.datetime(2026, 7, 18, 23, 59, 59, tzinfo=MSK)
+gs = GroupStub([
+    {"group_id": 1, "group_title": "Старое", "created_at": rfc(dt.datetime(2026, 1, 1))},
+    {"group_id": 2, "group_title": "Молодое", "created_at": rfc(dt.datetime(2026, 7, 15))},
+])
+cfg = {"grace_weeks": 4, "auto_detect": True, "overrides": {}}
+st = calibration.grace_status(gs, at=AT, cfg=cfg)
+check("старая группа без грации", st["groups"][1]["in_grace"], False)
+check("молодая группа в грации по авто-детекту", st["groups"][2]["in_grace"], True)
+check("источник решения — авто", st["groups"][2]["source"], "auto")
+check("выбраны только молодые", calibration.graced_group_ids(st), {2})
+
+# Переопределение снимает грацию с формально молодой группы.
+cfg_off = {"grace_weeks": 4, "auto_detect": True,
+           "overrides": {"2": {"in_grace": False, "note": "переезд старого потока",
+                               "decided": "2026-07-31", "by": "рук"}}}
+st = calibration.grace_status(gs, at=AT, cfg=cfg_off)
+check("переопределение снимает грацию", st["groups"][2]["in_grace"], False)
+check("видно, что решение ручное", st["groups"][2]["source"], "override")
+check("в примечании автор и дата",
+      st["groups"][2]["note"], "переезд старого потока (решение рук, 2026-07-31)")
+
+# И наоборот — выдаёт грацию старой группе.
+cfg_on = {"grace_weeks": 4, "auto_detect": True,
+          "overrides": {"1": {"in_grace": True, "note": "перезапуск направления"}}}
+st = calibration.grace_status(gs, at=AT, cfg=cfg_on)
+check("переопределение выдаёт грацию старой группе", st["groups"][1]["in_grace"], True)
+
+# Возраст считается на КОНЕЦ периода: отчёт за июль, пересобранный в сентябре,
+# должен видеть июльскую картину, иначе старый отчёт перестанет воспроизводиться.
+late = calibration.grace_status(gs, at=dt.datetime(2026, 9, 30, tzinfo=MSK), cfg=cfg)
+check("в сентябре июльская группа уже не в грации",
+      late["groups"][2]["in_grace"], False)
+check("а на конец июля — была",
+      calibration.grace_status(gs, at=AT, cfg=cfg)["groups"][2]["in_grace"], True)
+
+# Деление обращений по грации ничего не выкидывает.
+st = calibration.grace_status(gs, at=AT, cfg=cfg)
+normal, graced = calibration.split_cases(
+    [{"case_id": 1, "group_id": 1}, {"case_id": 2, "group_id": 2},
+     {"case_id": 3, "group_id": 2}], st)
+check("обращения делятся, а не теряются",
+      (len(normal), len(graced)), (1, 2))
+
+# --------------------------------------------------------------------------
+print(f"\n{'=' * 60}")
+if FAILED:
+    print(f"ПРОВАЛЕНО {len(FAILED)} из {PASSED + len(FAILED)}:")
+    for n in FAILED:
+        print(f"  - {n}")
+    sys.exit(1)
+print(f"Все проверки пройдены: {PASSED}")
+sys.exit(0)
