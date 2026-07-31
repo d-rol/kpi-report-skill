@@ -6,17 +6,43 @@
 
 Про делитель «сотрудников онлайн»
 ---------------------------------
-В формуле предложения поток делится на число одновременно работающих операторов.
-У нас одновременно онлайн **всегда 1 оператор** (подтверждено 2026-07-31), поэтому
-делитель по умолчанию = 1 и нагрузка на оператора равна самому потоку. Параметр
-`--online` оставлен явным и вынесен в вывод, чтобы при появлении второго оператора
-в ту же смену метрика не поехала молча — достаточно будет передать другое число.
+Поток делится на число одновременно работающих операторов. Делитель не
+константа: `--online auto` (по умолчанию) берёт число операторов на смене из
+`shifts.py`, который отличает смену от «заглянул на минуту». Это важно, если у
+вас бывает, что оператор вне смены заходит закрыть пару сторонних задач: считать
+его полноценной сменой — значит вдвое занизить нагрузку того, кто смену реально
+работал. Явное число тоже принимается (`--online 2`) и печатается в выводе,
+чтобы метрика не поехала молча.
+
 Ретроспективного лога «кто был онлайн» Omnidesk не даёт, поэтому историю статусов
 мы сознательно не собираем (это потребовало бы фонового сборщика/крона, а крон в
-этом проекте запрещён — период и сотрудник всегда приходят из запроса).
+этом проекте запрещён — период и сотрудник всегда приходят из запроса). Смена
+выводится из следа работы, а не из статусов.
 
 База считается по окну, которое ЗАКАНЧИВАЕТСЯ перед началом сравниваемого периода
 — иначе период сравнивался бы сам с собой.
+
+Про нижнюю границу пригодных данных (DATA_START / --since)
+----------------------------------------------------------
+⚠️ Грабли, на которые легко наступить. Если вы переезжали в Omnidesk постепенно
+(раньше переписка шла в соцсетях или почте напрямую, а в систему попадала лишь
+часть), то ранние обращения — это **не «низкий поток», а неполнота переезда**.
+Окно базы, дотянувшееся до периода переезда, даёт ложный вывод «поток вырос в
+разы»: вырос не поток, а покрытие системой. Дальше по этому мнимому росту
+принимаются решения о порогах SLA — и все они будут неверными.
+
+Поэтому есть нижняя граница пригодных данных. Окно базы обрезается по ней **до**
+запроса к API, а если после обрезки остаётся меньше `MIN_BASELINE_DAYS` дней,
+хелпер честно говорит «базы пока нет» вместо того, чтобы напечатать красивое, но
+бессмысленное число. Если период целиком раньше границы, окно схлопывается и в
+API мы не идём вовсе.
+
+По умолчанию границы нет (`DATA_START = None`) — тул не знает вашей истории
+внедрения. **Если переезд был, поставьте дату**, с которой Omnidesk стал
+основным каналом: разово — флагом `--since`, постоянно — прописав её в
+`DATA_START` ниже. Проверить себя просто: если недельный поток в начале истории
+аккаунта в разы ниже текущего, а роста бизнеса в разы не было — это переезд, а
+не рост.
 
 Запуск:
   python load_baseline.py --weeks 4 --cache
@@ -30,6 +56,7 @@ import collections
 import datetime as dt
 from email.utils import parsedate_to_datetime
 
+import shifts
 from omni_client import OmniClient
 
 # Windows-консоль по умолчанию не UTF-8 — иначе кириллица превращается в кракозябры.
@@ -43,6 +70,15 @@ MSK = dt.timezone(dt.timedelta(hours=3))
 WORK_START, WORK_END = 10, 22        # рабочее окно 10:00–22:00 МСК (как в аудите SLA)
 WD_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 FMT = "%Y-%m-%d %H:%M:%S"
+
+# Дата, с которой данные в Omnidesk пригодны для статистики. None = границы нет.
+# Ставьте сюда дату, с которой Omnidesk стал вашим основным каналом, если до неё
+# шёл постепенный переезд: иначе неполнота переезда прочитается как рост потока.
+# Пример: DATA_START = dt.datetime(2026, 7, 15, 0, 0, 0, tzinfo=MSK)
+# См. блок «Про нижнюю границу пригодных данных» в докстринге модуля.
+DATA_START = None
+# Меньше этого числа суток — база статистически пустая, честнее не считать.
+MIN_BASELINE_DAYS = 7.0
 
 
 def bucket_key(weekday, hour):
@@ -112,17 +148,34 @@ def _collect(client, start, end):
     return total, answered, earliest, by_week
 
 
-def build_baseline(client, end, weeks=4, online=1):
+def build_baseline(client, end, weeks=4, online=1, since=None):
     """Средний поток на (день недели, час) за `weeks` недель до `end`.
 
-    Окно усекается по первому реальному обращению: аккаунт молодой (данные примерно
-    с начала июля 2026), и если делить на все 4 недели, включая пустые до запуска
-    Омнидеска, база окажется занижённой — тогда любой обычный день выглядел бы
-    всплеском. Считаем базу только по той части окна, где данные вообще могли быть.
+    Окно обрезается снизу дважды:
+      * по `since` (DATA_START) — до этой даты Омнидеск не был основным каналом,
+        и низкие цифры там означают неполноту переезда, а не спокойный поток;
+      * по первому реальному обращению в окне — на случай, если данных нет даже
+        после `since`.
+    Без первой обрезки база уезжает вниз и любой обычный день выглядит всплеском.
     """
+    since = since or DATA_START
     start = end - dt.timedelta(weeks=weeks)
-    total, answered, earliest, by_week = _collect(client, start, end)
-    effective_start = max(start, earliest) if earliest else start
+    # Обрезаем ДО запроса: тянуть из API заведомо негодный период незачем.
+    # since = None означает «границы нет» (переезда не было или она не задана).
+    clipped_by_since = bool(since and start < since)
+    if since:
+        start = max(start, since)
+    collapsed = start >= end
+    if collapsed:
+        # Окно схлопнулось: отчётный период целиком раньше начала пригодных
+        # данных, база для него не существует. Ходить в API нельзя — Омнидеск
+        # на перевёрнутом диапазоне (from > to) отвечает 400. Возвращаем
+        # честно пустую базу, ниже её поймает флаг insufficient.
+        total = answered = by_week = collections.Counter()
+        start = effective_start = end
+    else:
+        total, answered, earliest, by_week = _collect(client, start, end)
+        effective_start = max(start, earliest) if earliest else start
     occ = _bucket_occurrences(effective_start, end)
     per_bucket = {}
     for key, times in occ.items():
@@ -152,6 +205,15 @@ def build_baseline(client, end, weeks=4, online=1):
             "effective_from": effective_start.strftime(FMT),
             "effective_days": round(days, 1),
             "truncated": effective_start > start,
+            # Окно упёрлось в дату начала пригодных данных, а не в первое
+            # обращение — значит запрошено больше истории, чем существует.
+            "clipped_by_data_start": clipped_by_since,
+            # Окно схлопнулось в точку: отчётный период целиком раньше data_start.
+            "collapsed": collapsed,
+            "data_start": since.strftime(FMT) if since else None,
+            # Базы фактически нет: считать средние не на чем.
+            "insufficient": days < MIN_BASELINE_DAYS,
+            "min_days": MIN_BASELINE_DAYS,
         },
         "online_staff": online,
         "cases_total": sum(total.values()),
@@ -298,22 +360,61 @@ def main():
     ap.add_argument("--from", dest="from_time", help="начало сравниваемого периода 'YYYY-MM-DD HH:MM:SS' (МСК)")
     ap.add_argument("--to", dest="to_time", help="конец сравниваемого периода")
     ap.add_argument("--weeks", type=int, default=4, help="глубина базы в неделях (по умолчанию 4)")
-    ap.add_argument("--online", type=int, default=1,
-                    help="сколько операторов работает одновременно (по умолчанию 1 — текущая реальность)")
+    ap.add_argument("--online", default="auto",
+                    help="сколько операторов работает одновременно: число или "
+                         "'auto' (по умолчанию) — вывести из графика смен, "
+                         "не считая тех, кто заглянул мимо смены")
+    ap.add_argument("--since", default=DATA_START.strftime(FMT) if DATA_START else None,
+                    help="нижняя граница пригодных данных 'YYYY-MM-DD HH:MM:SS' "
+                         + (f"(по умолчанию {DATA_START.strftime('%Y-%m-%d')} — "
+                            "до этого Омнидеск не был основным каналом)"
+                            if DATA_START else
+                            "(по умолчанию границы нет; поставьте дату, если был "
+                            "постепенный переезд в Омнидеск)"))
     ap.add_argument("--json", action="store_true", help="вывести результат в JSON")
     ap.add_argument("--cache", action="store_true", help="читать/писать ответы API в scripts/cache")
     args = ap.parse_args()
 
     client = OmniClient(cache=args.cache)
+    since = (dt.datetime.strptime(args.since, FMT).replace(tzinfo=MSK)
+             if args.since else None)
 
     if args.from_time and args.to_time:
         base_end = dt.datetime.strptime(args.from_time, FMT).replace(tzinfo=MSK)
     else:
         base_end = dt.datetime.now(MSK)
-    baseline = build_baseline(client, base_end, weeks=args.weeks, online=args.online)
+    baseline = build_baseline(client, base_end, weeks=args.weeks,
+                              online=1, since=since)
+
+    # Делитель нагрузки. По регламенту онлайн один оператор, но второй иногда
+    # заходит закрыть сторонние задачи — если считать его сменой, нагрузка
+    # основного оператора делится пополам на ровном месте. Поэтому по умолчанию
+    # число операторов берём из графика смен (shifts.py), а не с потолка.
+    online_note = None
+    if str(args.online).lower() == "auto":
+        r_from = args.from_time or baseline["window"]["effective_from"]
+        r_to = args.to_time or baseline["window"]["to"]
+        rst = shifts.roster(client, r_from, r_to)
+        avg = shifts.avg_online(rst)
+        if avg:
+            baseline["online_staff"] = avg
+            off = sum(r["cases"] for d in rst["days"].values() for r in d["visitors"])
+            online_note = (f"из графика смен: {avg} (мимо смены закрыто {off} "
+                           "обращений — в делитель не пошли)")
+        else:
+            baseline["online_staff"] = 1
+            online_note = "график смен не определился — считаем по одному оператору"
+        baseline["shifts"] = rst
+    else:
+        baseline["online_staff"] = int(args.online)
+        online_note = "задано вручную"
 
     result = {"baseline": baseline}
-    if args.from_time and args.to_time:
+    if args.from_time and args.to_time and not baseline["window"]["insufficient"]:
+        # Сравнение с пустой базой дало бы «ожидали 0, пришло 300, x∞» —
+        # цифру, которая выглядит как вывод, но им не является. Поэтому при
+        # insufficient секции comparison просто нет: потребитель (report.py)
+        # обязан это заметить, а не отрендерить пустышку.
         result["comparison"] = compare(client, args.from_time, args.to_time, baseline)
 
     if args.json:
@@ -321,13 +422,31 @@ def main():
         return
 
     b = baseline["window"]
-    print(f"\nБаза нагрузки: {b['from']} — {b['to']} ({b['weeks']} нед)")
+    ds = (b["data_start"] or "")[:10]
+    if b["collapsed"]:
+        print(f"\nБаза нагрузки: пусто — весь запрошенный период раньше {ds}"
+              if ds else "\nБаза нагрузки: пусто — окно схлопнулось")
+    else:
+        print(f"\nБаза нагрузки: {b['from']} — {b['to']} ({b['weeks']} нед)")
+    if b["clipped_by_data_start"]:
+        print(f"  ⓘ окно обрезано по {ds} — раньше этой даты Омнидеск ещё не был "
+              "основным каналом (шёл переезд),")
+        print("    и низкие цифры там означали бы неполноту переезда, а не спокойный поток")
     if b["truncated"]:
         print(f"  ⚠ данных раньше {b['effective_from']} нет — база считается "
               f"по {b['effective_days']} дн, а не по {b['weeks']} нед")
     print(f"  обращений в базе: {baseline['cases_total']} "
           f"(с реальным ответом: {baseline['answered_total']})")
-    print(f"  операторов онлайн одновременно: {baseline['online_staff']}")
+    print(f"  операторов онлайн одновременно: {baseline['online_staff']}"
+          + (f" — {online_note}" if online_note else ""))
+
+    if b["insufficient"]:
+        print(f"\n⚠ БАЗЫ ПОКА НЕТ: пригодных данных всего {b['effective_days']} дн "
+              f"(нужно минимум {b['min_days']:.0f}).")
+        print("  Сравнивать не с чем — любые «выше/ниже обычного» на таком объёме")
+        print("  были бы выдумкой. Вернитесь к этому, когда накопится история"
+              + (f" с {ds}." if ds else "."))
+        return
 
     cmp_ = result.get("comparison")
     if not cmp_:

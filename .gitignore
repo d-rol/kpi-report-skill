@@ -12,6 +12,10 @@ scripts/*.log
 # В репозитории лежит только calibration.example.json.
 scripts/calibration.json
 
+# График смен — содержит реальные staff_id и решения по конкретным дням.
+# В репозитории лежит только shifts.example.json.
+scripts/shifts.json
+
 # Локальные прогоны/вывод отчётов
 *_report.json
 *_render.md
