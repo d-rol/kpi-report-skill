@@ -20,7 +20,10 @@
   * калибровочная грация: авто-детект по возрасту и переопределения в обе
     стороны;
   * контекст нагрузки в отчёте: «базы нет» обязано читаться иначе, чем «поток
-    был как обычно» — иначе отчёт врёт в пользу спокойной картины.
+    был как обычно» — иначе отчёт врёт в пользу спокойной картины;
+  * аудит критичных: чат, упавший на оператора, и чат, взятый им из очереди
+    руками, различаются только полем done_by — перепутать их значит отправить
+    руководителю на ручной разбор случай, где разбирать нечего.
 
 Запуск:  python scripts/selftest.py
 Код возврата 0 — всё сошлось, 1 — есть падения (годится для CI).
@@ -42,6 +45,7 @@ import shifts
 import calibration
 import load_baseline as lb
 import report
+import audit_critical
 
 MSK = lb.MSK
 FAILED = []
@@ -343,6 +347,72 @@ check("нагрузки нет (personal): строк нет", report.load_lines
 check("пометка всплеска", report.spike_note({"spike_ratio": 2.4}),
       " · час всплеска x2.4")
 check("без всплеска — пусто", report.spike_note({"held_min": 40}), "")
+
+# --------------------------------------------------------------------------
+section("Аудит критичных: сам взял или чат упал")
+# --------------------------------------------------------------------------
+# Омнидеск пишет одно и то же событие `fixed_chat 0 -> оператор` и когда чат
+# падает на человека сам, и когда человек берёт его из очереди руками. Разница
+# видна только в done_by. Пока её не учитывали, осознанный клейм уезжал в
+# «пограничные» — то есть на ручной разбор к руководителю вместо личных.
+CRIT_CASE = {"case_number": "1-1", "case_id": 1, "staff": "Оператор А",
+             "first_response_min": 29.0, "group_id": 1}
+
+
+class AuditStub:
+    """Отдаёт messages.json и changelog.json по одному обращению."""
+
+    def __init__(self, reply_at, reply_staff, events):
+        self.reply_at, self.reply_staff, self.events = reply_at, reply_staff, events
+
+    def get(self, path, params=None):
+        if path.endswith("messages.json"):
+            return {"0": {"message": {"message_type": "reply_staff",
+                                      "created_at": rfc(self.reply_at),
+                                      "staff_id": self.reply_staff}}}
+        return {"changelog": [{"event": ev, "created_at": rfc(ts), "old_value": old,
+                               "value": new, "done_by": by}
+                              for ts, ev, old, new, by in self.events]}
+
+
+def audited(assigned_at, done_by, reply_at, old="0", new="1"):
+    ev = [(assigned_at, "fixed_chat", old, new, done_by)]
+    return audit_critical.audit_case(AuditStub(reply_at, 1, ev), CRIT_CASE)
+
+D = dt.datetime(2026, 7, 21, tzinfo=MSK)
+HELD_21 = (D.replace(hour=15, minute=50), D.replace(hour=16, minute=11))
+HELD_70 = (D.replace(hour=15, minute=0), D.replace(hour=16, minute=10))
+
+# Чат упал сам — оператор его не выбирал: пограничное, руководителю на оценку.
+v = audited(HELD_21[0], "omnidesk", HELD_21[1])
+check("упавший чат: личное", v["kind"], "personal")
+check("упавший чат: помечен авто-чатом", v["auto_chat"], True)
+check("упавший чат: пограничное", v["borderline"], True)
+check("удержание в рабочих минутах", v["held_min"], 21.0)
+
+# Назначило правило — оператор тоже ни при чём.
+check("назначение правилом: пограничное",
+      audited(HELD_21[0], "rule_10042", HELD_21[1])["borderline"], True)
+
+# Взял из очереди сам — судить нечего, это чистое личное.
+v = audited(HELD_21[0], "staff_1", HELD_21[1])
+check("взял сам: личное", v["kind"], "personal")
+check("взял сам: не авто-чат", v["auto_chat"], False)
+check("взял сам: не пограничное", v["borderline"], False)
+
+# Чужой клейм на то же обращение авто-чатом быть не перестаёт.
+check("взял не отвечавший: всё ещё авто-чат",
+      audited(HELD_21[0], "staff_2", HELD_21[1])["auto_chat"], True)
+
+# Долгое удержание пограничным не становится независимо от того, кто назначил.
+check("долго держал после авто-чата: не пограничное",
+      audited(HELD_70[0], "omnidesk", HELD_70[1])["borderline"], False)
+
+# Ответил в пределах SLA с момента владения — вина не его, и вопроса «сам взял
+# или упало» не возникает вовсе.
+v = audited(D.replace(hour=16, minute=5), "staff_1", D.replace(hour=16, minute=11))
+check("ответил в SLA: унаследовано", v["kind"], "systemic_noresp")
+check("ответил в SLA: авто-чат не размечаем", "auto_chat" in v, False)
 
 # --------------------------------------------------------------------------
 print(f"\n{'=' * 60}")

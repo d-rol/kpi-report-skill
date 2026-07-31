@@ -209,14 +209,22 @@ def audit_case(client, case):
             neglected_by=(None if prior_owner == "0" else prior_owner),
         )
     else:
-        auto_chat = prior_owner == "0"  # авто-подхват чата из очереди, не ручной клейм
+        # Кто сделал назначение, а не только откуда пришло обращение. Омнидеск
+        # ставит fixed_chat 0->staff и когда чат падает на оператора сам
+        # (done_by = omnidesk / rule_<id>), и когда оператор берёт его из очереди
+        # руками (done_by = staff_<он же>). Одно только prior_owner == '0' эти два
+        # случая не различает, и осознанный клейм уезжал в «авто-чат»
+        # и в пограничные — то есть в разбор к руководителю вместо личных.
+        self_claimed = done_by == f"staff_{reply_staff}"
+        auto_chat = prior_owner == "0" and not self_claimed
         verdict.update(
             kind="personal",
             reason=f"держал {held_min:.0f} мин до ответа",
             held_min=round(held_min, 1),
             assigned_by=done_by,
             auto_chat=auto_chat,
-            borderline=held_min <= BORDERLINE_HELD_MAX,
+            # Взял сам — судить нечего: владение началось с его же действия.
+            borderline=not self_claimed and held_min <= BORDERLINE_HELD_MAX,
         )
     return verdict
 
