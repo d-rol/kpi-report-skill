@@ -46,6 +46,7 @@ import calibration
 import load_baseline as lb
 import report
 import audit_critical
+import topics
 
 MSK = lb.MSK
 FAILED = []
@@ -413,6 +414,83 @@ check("долго держал после авто-чата: не пограни
 v = audited(D.replace(hour=16, minute=5), "staff_1", D.replace(hour=16, minute=11))
 check("ответил в SLA: унаследовано", v["kind"], "systemic_noresp")
 check("ответил в SLA: авто-чат не размечаем", "auto_chat" in v, False)
+
+# --------------------------------------------------------------------------
+section("Темы обращений")
+# --------------------------------------------------------------------------
+# Главный риск разреза по темам — неполная разметка. Классификатор включают
+# позже, чем начинают работать, и «возвратов 3%» одинаково выглядит и когда
+# возвратов мало, и когда размечено мало. Поэтому проверяем не столько
+# арифметику, сколько то, что охват нельзя не заметить.
+FIELDS_RAW = {
+    "4101": {"field_id": 4101, "title": "Тема обращения (продукт А)",
+              "field_type": "select", "field_level": "case",
+              "field_data": {"1": "Не работает", "2": "Возврат денег"}},
+    # Поле уровня КЛИЕНТА с похожим названием — в разрез попадать не должно:
+    # оно описывает человека, а не обращение.
+    "4102": {"field_id": 4102, "title": "Тема обращения клиента",
+              "field_type": "select", "field_level": "user",
+              "field_data": {"1": "VIP"}},
+    "4103": {"field_id": 4103, "title": "Баланс", "field_type": "textarea",
+              "field_level": "user", "field_data": {}},
+}
+
+
+class FieldsStub:
+    def custom_fields_map(self):
+        return FIELDS_RAW
+
+
+tf = topics.topic_fields(FieldsStub())
+check("справочник: взяли только поле уровня обращения", sorted(tf), ["4101"])
+check("тема расшифрована из ключа",
+      topics.case_topic({"custom_fields": {"cf_4101": "2"}}, tf), "Возврат денег")
+check("темы нет -> None", topics.case_topic({"custom_fields": {}}, tf), None)
+check("поле клиента темой не считается",
+      topics.case_topic({"custom_fields": {"cf_4102": "1"}}, tf), None)
+# Вариант удалили из справочника после того, как его проставили: обращение
+# терять нельзя, отдаём сырое значение.
+check("неизвестный вариант не теряется",
+      topics.case_topic({"custom_fields": {"cf_4101": "9"}}, tf), "9")
+
+# 10 обращений: 6 размечены (2 темы), 4 без темы — и среди безтемных есть просрочка.
+rows = ([("Не работает", True)] * 2 + [("Не работает", False)] * 2
+        + [("Возврат денег", True)] * 1 + [("Возврат денег", False)] * 1
+        + [(None, True)] * 1 + [(None, False)] * 3)
+s = topics.summary(rows)
+check("охват считается от всех обращений", s["coverage"], 0.6)
+check("низкий охват поднимает флаг", s["low_coverage"], True)
+check("просрочки без темы не теряются", s["untagged_violations"], 1)
+# Доля внутри темы, а не доля темы в потоке: 2 просрочки из 4 обращений темы.
+check("доля просрочек внутри темы", s["topics"][0]["violation_rate"], 0.5)
+check("сортировка по числу просрочек", [x["topic"] for x in s["topics"]],
+      ["Не работает", "Возврат денег"])
+check("безтемные в список тем не попали", len(s["topics"]), 2)
+
+line = "\n".join(report.topic_lines(s))
+check("охват назван в рендере", "размечено 6 из 10 обращений, 60%" in line, True)
+check("при низком охвате — оговорка вслух", "Разметка неполная" in line, True)
+
+# Полный охват: оговорки быть не должно, иначе она обесценится.
+s_full = topics.summary([("Не работает", True), ("Не работает", False)])
+check("полный охват: флага нет", s_full["low_coverage"], False)
+check("полный охват: без оговорки",
+      "Разметка неполная" in "\n".join(report.topic_lines(s_full)), False)
+
+# Ничего не размечено — это НЕ «тем не было». Должно звучать по-другому.
+s_none = topics.summary([(None, True)] * 5)
+line = "\n".join(report.topic_lines(s_none))
+check("нет разметки: сказано словами", "тем не проставил" in line, True)
+check("нет разметки: не выдаём пустой топ", "```" in line, False)
+# В личном отчёте разреза нет вообще — рендер обязан промолчать, а не упасть.
+check("тем нет (personal): строк нет", report.topic_lines(None), [])
+
+# Обрезка списка обязана быть видимой: молча показанные N строк читаются как
+# «вот все темы», и хвост исчезает бесследно.
+many = topics.summary([(f"Тема {i}", True) for i in range(12)])
+line = "\n".join(report.topic_lines(many, limit=8))
+check("обрезка названа вслух", "из 12 с просрочками" in line, True)
+check("без обрезки — молчим", "Показаны" in "\n".join(report.topic_lines(s_full)), False)
 
 # --------------------------------------------------------------------------
 print(f"\n{'=' * 60}")

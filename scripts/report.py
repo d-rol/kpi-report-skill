@@ -42,6 +42,7 @@ from calibration import grace_status, load_config, MSK, FMT as CAL_FMT
 # Импортируем модулем, а не именами: внутри gather() локальная переменная `lb` —
 # это лидерборд, и короткий алиас молча затенил бы модуль.
 import load_baseline
+import topics as topics_mod
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -80,6 +81,11 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
                 and lb[k]["staff"]["staff_id"] == staff_id), {})
 
     # 2) Наш проход по обращениям сотрудника: деление нарушений SLA.
+    # Справочник тем тянем один раз на весь прогон: он общий для всех обращений,
+    # и запрашивать его в цикле значило бы сжечь rate limit на одну и ту же
+    # страницу. Один запрос на отчёт.
+    topic_fields = topics_mod.topic_fields(client) if want_team else {}
+    topic_rows = []
     buckets = {"light": [], "medium": [], "critical": []}
     answered = 0
     for case in client.iter_cases(from_time=from_time, to_time=to_time,
@@ -91,6 +97,12 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
             continue
         answered += 1
         cat, excess = classify(spd)
+        # Тему собираем по ВСЕМ отвеченным обращениям, а не только по просроченным:
+        # без знаменателя «сколько всего обращений этой темы» топ просрочек
+        # покажет просто самые частые темы, а не самые тяжёлые.
+        if topic_fields:
+            topic_rows.append((topics_mod.case_topic(case, topic_fields),
+                               cat is not None))
         if cat is None:
             continue
         buckets[cat].append({
@@ -203,6 +215,9 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
 
     if want_team:
         result["load"] = load
+        # Разрез по темам — менеджерский: он отвечает на вопрос «какие вопросы
+        # команда не тянет», а это про обучение и базу знаний, не про сотрудника.
+        result["topics"] = topics_mod.summary(topic_rows) if topic_fields else None
         result["team_no_responsible"] = {
             "live": live_snapshot(client),
             "period": period_breakdown(client, from_time, to_time),
@@ -338,6 +353,48 @@ def load_lines(load):
     return [line]
 
 
+def topic_lines(t, limit=8):
+    """Разрез просрочек по темам обращений.
+
+    Печатаем долю просрочек ВНУТРИ темы, а не долю темы в потоке: первая
+    отвечает на вопрос «что даётся тяжелее», вторая — «чего просто больше».
+    Охват называем всегда: при неполной разметке порядок тем может быть не
+    окончательным, и руководитель должен видеть это рядом с числами, а не
+    узнать потом.
+    """
+    if not t:
+        return []
+    if not t.get("cases_tagged"):
+        return ["\n**Темы обращений:** классификатор за этот период тем не "
+                "проставил — разреза нет. (Это не «тем не было»: тема ставится "
+                "автоматикой, и на части периода её может не быть вовсе.)"]
+    pct = round(t["coverage"] * 100)
+    out = [f"\n**Просрочки по темам** (размечено {t['cases_tagged']} из "
+           f"{t['cases_total']} обращений, {pct}%)"]
+    if t.get("low_coverage"):
+        out.append(f"_Разметка неполная. Доли внутри тем считаются от размеченных; "
+                   f"порядок тем на таком охвате ещё может измениться. Просрочек "
+                   f"без темы: {t['untagged_violations']}._")
+    rows_all = [x for x in t["topics"] if x["violations"]]
+    rows = rows_all[:limit]
+    if not rows:
+        out.append("Ни одной просрочки в размеченных обращениях.")
+        return out
+    width = max(len(x["topic"]) for x in rows)
+    out.append("```")
+    for x in rows:
+        share = round((x["violation_rate"] or 0) * 100)
+        out.append(f"{x['topic']:<{width}}  {x['violations']:>3} из {x['cases']:<4} "
+                   f"{bar(share, width=14)} {share}%")
+    out.append("```")
+    # Обрезали список — говорим об этом. Молча показанные 8 строк читаются как
+    # «вот все темы с просрочками», и хвост исчезает бесследно.
+    if len(rows_all) > len(rows):
+        out.append(f"_Показаны {len(rows)} тем из {len(rows_all)} с просрочками "
+                   "(полный список — флаг `--json`)._")
+    return out
+
+
 def render_manager(r):
     s, raw = r["speed"], r["sla_raw_omnidesk"]
     sla, sp = r["sla_audited"], r["sla_percent"]
@@ -367,6 +424,7 @@ def render_manager(r):
                f"(унаследовано из очереди {sla['critical_inherited']}).")
 
     out.extend(load_lines(r.get("load")))
+    out.extend(topic_lines(r.get("topics")))
 
     personal = r["personal_critical_cases"]
     clear = sorted([v for v in personal if not v.get("borderline")],

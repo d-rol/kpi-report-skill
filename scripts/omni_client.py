@@ -146,6 +146,28 @@ class OmniClient:
             time.sleep(pause)
         return data.get("case", data)
 
+    def custom_fields_map(self):
+        """field_id (строкой) -> описание кастомного поля Омнидеска.
+
+        Нужен, чтобы превратить сырое значение выпадающего списка (в обращении
+        лежит КЛЮЧ варианта, например "3") в читаемое название темы. Устроен не
+        как справочники групп и меток: id лежит в `field_id`, варианты — в
+        `field_data`, уровень поля (обращение или клиент) — в `field_level`.
+        """
+        out = {}
+        page = 1
+        while True:
+            data = self.get("custom_fields.json", {"page": page, "limit": 100})
+            batch = [k for k in data if str(k).isdigit()]
+            for k in batch:
+                f = data[k].get("custom_field")
+                if f:
+                    out[str(f.get("field_id"))] = f
+            if len(batch) < 100:
+                break
+            page += 1
+        return out
+
     def staff_map(self):
         """staff_id -> имя, из лидерборда статистики (за 7 дней достаточно для маппинга)."""
         data = self.get("stats_leaderboard.json", {"period": "last_7_days"})

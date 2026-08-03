@@ -206,6 +206,66 @@ def _case_row(r, v, with_link=True):
             f"<td class=num>{_esc(held)}</td><td>{_esc(v['reason'])}</td></tr>")
 
 
+def _load_card(load):
+    """Контекст нагрузки. Пустая строка только если нагрузки нет в отчёте вообще
+    (личный вид); «базы нет» печатается словами — молчание тут врёт."""
+    if not load:
+        return ""
+    if not load.get("available"):
+        return ("<div class=card><h2>Нагрузка</h2>"
+                f"<p class=hint>Сравнивать не с чем — {_esc(load.get('reason'))}. "
+                "Проценты выше от этого не меняются, но контекста «поток был "
+                "обычный или нет» у отчёта пока нет.</p></div>")
+    lpo = load.get("load_per_operator") or {}
+    vs_week = (load.get("vs_last_week") or {}).get("ratio")
+    extra = f", x{_esc(vs_week)} к последней неделе базы" if vs_week else ""
+    note = ""
+    if load.get("clipped_by_data_start"):
+        note = (f"<p class=hint>База короткая — {_esc(load['baseline_days'])} дн "
+                f"вместо {_esc(load['baseline_weeks'])} нед: раньше Омнидеск не был "
+                "основным каналом. Сравнение ориентировочное.</p>")
+    return ("<div class=card><h2>Нагрузка</h2>"
+            f"<p>Пришло <b>{_esc(load['actual_cases'])}</b> обращений против обычных "
+            f"<b>{_esc(load['expected_cases'])}</b> (x{_esc(load['ratio'])} к среднему"
+            f"{extra}).</p>"
+            f"<p class=hint>{_esc(lpo.get('cases_per_work_hour'))} обращений/час на "
+            f"{_esc(load['online_staff'])} оператора в окно "
+            f"{_esc(lpo.get('work_window'))}.</p>{note}</div>")
+
+
+def _topics_card(t, limit=8):
+    """Разрез просрочек по темам. Охват называется всегда — см. topics.py."""
+    if not t:
+        return ""
+    if not t.get("cases_tagged"):
+        return ("<div class=card><h2>Темы обращений</h2>"
+                "<p class=hint>Классификатор за этот период тем не проставил — "
+                "разреза нет. Это не «тем не было»: тема ставится автоматикой, "
+                "и на части периода её может не быть вовсе.</p></div>")
+    rows_all = [x for x in t["topics"] if x["violations"]]
+    rows = rows_all[:limit]
+    body = "".join(
+        f"<tr><td>{_esc(x['topic'])}</td>"
+        f"<td class=num>{_esc(x['violations'])} из {_esc(x['cases'])}</td>"
+        f"<td class=num>{round((x['violation_rate'] or 0) * 100)}%</td></tr>"
+        for x in rows)
+    warn = ""
+    if t.get("low_coverage"):
+        warn = ("<p class=hint>Разметка неполная. Доли внутри тем считаются от "
+                "размеченных; порядок тем на таком охвате ещё может измениться. "
+                f"Просрочек без темы: {_esc(t['untagged_violations'])}.</p>")
+    more = ""
+    if len(rows_all) > len(rows):
+        more = (f"<p class=hint>Показаны {len(rows)} тем из {len(rows_all)} "
+                "с просрочками.</p>")
+    pct = round(t["coverage"] * 100)
+    return ("<div class=card><h2>Просрочки по темам</h2>"
+            f"<p class=hint>Размечено {_esc(t['cases_tagged'])} из "
+            f"{_esc(t['cases_total'])} обращений ({pct}%).</p>{warn}"
+            "<table><thead><tr><th>Тема</th><th class=num>Просрочек</th>"
+            f"<th class=num>Доля</th></tr></thead><tbody>{body}</tbody></table>{more}</div>")
+
+
 def render_html(r, view="manager"):
     if view == "personal":
         return _doc(f"KPI — {r['staff']}", _render_personal(r))
@@ -261,6 +321,13 @@ def _render_manager(r):
         f"После аудита критичные {allv['critical']} → личных {pers['critical']} "
         f"(унаследовано из очереди: {r['sla_audited']['critical_inherited']}).</p></div>"
     )
+
+    # Нагрузка и темы — те же блоки, что в чат-рендере. Держим оба рендера в
+    # паритете сознательно: страница обещает «ту же информацию», и молчание про
+    # нагрузку здесь прочиталось бы как «поток был обычный», а отсутствие тем —
+    # как «просрочки ничем не объединены».
+    parts.append(_load_card(r.get("load")))
+    parts.append(_topics_card(r.get("topics")))
 
     # Личные критичные — чисто личные (не пограничные).
     personal = r["personal_critical_cases"]
