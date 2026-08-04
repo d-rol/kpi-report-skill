@@ -252,10 +252,24 @@ def build_report():
     return r
 
 
+# Предупреждение ВИДИМОЕ, а не в HTML-комментарии: на GitHub комментарий
+# скрывается при рендере, и человек увидел бы отчёт с цифрами без единого
+# признака, что они выдуманы. Ровно та тихая неправда, которой проект избегает.
 HEADER = (
-    "<!-- Файл собран автоматически: python scripts/make_example.py\n"
-    "     Данные ВЫДУМАНЫ — подставной клиент, условные имена и обращения.\n"
-    "     Править руками нельзя: расхождение с рендером ловит selftest. -->\n\n")
+    "> **Это образец на выдуманных данных.** Обращения, имена и цифры "
+    "условные — файл собран подставным клиентом, а не вычищен из чьего-то "
+    "настоящего отчёта.\n>\n"
+    "> Собирается автоматически: `python scripts/make_example.py`. Править "
+    "руками нельзя — расхождение с рендером ловит `selftest.py`.\n\n")
+
+# Тот же смысл для HTML: его открывают отдельно от репозитория, и там тоже
+# должно быть сразу видно, что данные ненастоящие.
+HTML_BANNER = (
+    "<div class=card style='border-color:var(--warn)'>"
+    "<h2 style='color:var(--warn)'>Образец на выдуманных данных</h2>"
+    "<p class=hint>Обращения, имена и цифры условные — страница собрана "
+    "подставным клиентом (<code>scripts/make_example.py</code>), а не вычищена "
+    "из настоящего отчёта. Показывает формат, а не чью-то статистику.</p></div>")
 
 
 def render_all():
@@ -263,7 +277,8 @@ def render_all():
     return {
         "report_manager.md": HEADER + report.render_manager(r) + "\n",
         "report_personal.md": HEADER + report.render_personal(r) + "\n",
-        "report_manager.html": report_html.render_html(r, "manager"),
+        "report_manager.html": report_html.render_html(r, "manager").replace(
+            "<div class=wrap>", "<div class=wrap>" + HTML_BANNER, 1),
     }
 
 
