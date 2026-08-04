@@ -17,6 +17,8 @@
 """
 import html
 
+import backlog
+
 
 def _esc(v):
     return html.escape(str(v), quote=True)
@@ -132,6 +134,9 @@ details > summary::-webkit-details-marker { display: none; }
 details > summary::before { content: "▸ "; }
 details[open] > summary::before { content: "▾ "; }
 .foot { color: var(--muted); font-size: 12px; text-align: center; margin-top: 22px; }
+.split { border-top: 2px dashed var(--border); margin: 34px 0 16px; padding-top: 22px; }
+.split h2 { margin: 0 0 6px; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+.split .hint { margin: 0; }
 """
 
 
@@ -149,12 +154,17 @@ def _fmt_min(v):
 
 
 def _head(r, view):
+    """Шапка страницы.
+
+    Плашку вида отчёта держим в подзаголовке, а не рядом с именем: «Дима
+    руководитель» читалось как должность, хотя означает «отчёт руководителю».
+    """
     label = "Отчёт руководителю" if view == "manager" else "Личный отчёт"
-    badge = ("<span class='badge manager'>руководитель</span>" if view == "manager"
-             else "<span class=badge>личный</span>")
+    cls = "badge manager" if view == "manager" else "badge"
     p = r["period"]
-    return (f"<div class=head><h1>{_esc(r['staff'])}{badge}</h1>"
-            f"<div class=period>KPI поддержки · {_esc(p['from'])} — {_esc(p['to'])}</div></div>")
+    return (f"<div class=head><h1>KPI поддержки — {_esc(r['staff'])}</h1>"
+            f"<div class=period><span class='{cls}'>{_esc(label)}</span> "
+            f"{_esc(p['from'])} — {_esc(p['to'])}</div></div>")
 
 
 def _speed_card(r, extra=False):
@@ -196,14 +206,17 @@ def _sla_bar(r):
     return f"<div class=bar>{bar}</div><div class=legend>{legend}</div>"
 
 
-def _case_row(r, v, with_link=True):
+def _case_row(r, v, with_link=True, reason_as_cause=False):
     tpl = r.get("case_url_tpl")
     num = _esc(v["case_number"])
     cell = (f"<a class=case href='{_esc(tpl.format(case_number=v['case_number']))}' target=_blank rel=noopener>#{num}</a>"
             if (with_link and tpl) else f"#{num}")
     held = "—" if v.get("held_min") is None else f"{v['held_min']} мин"
+    # По унаследованным показываем ПРИРОДУ задержки, а не только её источник:
+    # «из общей очереди» одинаково у всех и не объясняет, почему обращение ждало.
+    text = backlog.delay_cause(v) if reason_as_cause else v["reason"]
     return (f"<tr><td>{cell}</td><td class=num>{_esc(v['first_response_min'])} мин</td>"
-            f"<td class=num>{_esc(held)}</td><td>{_esc(v['reason'])}</td></tr>")
+            f"<td class=num>{_esc(held)}</td><td>{_esc(text)}</td></tr>")
 
 
 def _load_card(load):
@@ -310,9 +323,15 @@ def render_html(r, view="manager"):
 
 
 def _render_personal(r):
+    return "".join([_head(r, "personal")] + _personal_body(r))
+
+
+def _personal_body(r):
+    """Карточки личного отчёта без шапки — их же подклеиваем в конец
+    менеджерского, чтобы руководителю не пересобирать отчёт для сотрудника."""
     sp = r["sla_percent"]
     pers = sp["personal_after_audit"]
-    parts = [_head(r, "personal"), _speed_card(r, extra=False)]
+    parts = [_speed_card(r, extra=False)]
 
     # Реальный SLA — только личное, без унаследованного времени очереди.
     inh = r["sla_audited"]["critical_inherited"]
@@ -335,7 +354,7 @@ def _render_personal(r):
         "<p class=hint>Засчитывается в плюс — справочно.</p></div>"
     )
     parts.append("<div class=foot>Показатели скорости — медианы (устойчивы к выбросам).</div>")
-    return "".join(parts)
+    return parts
 
 
 def _render_manager(r):
@@ -405,7 +424,8 @@ def _render_manager(r):
     # Унаследованные — свёрнуто.
     inh = sorted(r["inherited_critical_cases"], key=lambda x: -x["first_response_min"])
     if inh:
-        rows = "".join(_case_row(r, v, with_link=False) for v in inh[:12])
+        rows = "".join(_case_row(r, v, with_link=False, reason_as_cause=True)
+                       for v in inh[:12])
         more = (f"<p class=hint>…и ещё {len(inh) - 12} (полный список — флаг --json).</p>"
                 if len(inh) > 12 else "")
         kinds = {}
@@ -425,7 +445,7 @@ def _render_manager(r):
             "момента — задержка не его. «Держал 0.0 мин» = взял и ответил сразу.</p>"
             f"<p class=hint>Откуда пришли: {_esc(origin)}.</p>"
             "<table><thead><tr><th>Обращение</th><th class=num>Первый ответ</th>"
-            "<th class=num>Держал</th><th>Источник</th></tr></thead>"
+            "<th class=num>Держал</th><th>Природа задержки</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>{more}</details></div>"
         )
 
@@ -509,4 +529,16 @@ def _render_manager(r):
 
     parts.append("<div class=foot>Скорость — нативные медианы Омнидеска. "
                  "Аудированный SLA — по истории обращений (changelog).</div>")
+
+    # Версия для сотрудника — в конце той же страницы. Руководителю не нужно
+    # пересобирать отчёт вторым прогоном: он сразу видит, что именно увидит
+    # сотрудник, и может переслать этот кусок как есть. Менеджерского слоя тут
+    # нет по построению — те же карточки, что и в отдельном личном отчёте.
+    parts.append(
+        "<div class=split><h2>Версия для сотрудника</h2>"
+        "<p class=hint>Ниже — то же самое глазами сотрудника: скорость, реальный "
+        "SLA без унаследованных задержек и «разобрал зависшее». Без ссылок на "
+        "обращения, без разбора критичных и без командных метрик. Можно "
+        "переслать как есть.</p></div>")
+    parts.extend(_personal_body(r))
     return "".join(parts)

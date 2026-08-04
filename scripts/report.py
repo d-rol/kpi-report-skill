@@ -566,12 +566,12 @@ def render_manager(r):
         parts = [f"{backlog.KIND_LABELS[k]} — {n}"
                  for k, n in sorted(kinds.items(), key=lambda x: -x[1])]
         out.append(f"\nОткуда пришли: {', '.join(parts)}.\n")
-        out.append("| Обращение | Первый ответ | Держал | Источник |")
+        out.append("| Обращение | Первый ответ | Держал | Природа задержки |")
         out.append("|---|--:|--:|---|")
         for v in inh[:12]:
             held = "—" if v.get("held_min") is None else f"{v['held_min']} мин"
             out.append(f"| {case_link(r, v)} | {v['first_response_min']} мин | {held} "
-                       f"| {v['reason']}{arrival_note(v)} |")
+                       f"| {backlog.delay_cause(v)} |")
         if len(inh) > 12:
             out.append(f"\n…и ещё {len(inh) - 12} (полный список — флаг `--json`).")
         out.append("\n</details>")
