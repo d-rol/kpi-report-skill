@@ -90,7 +90,9 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
     # и запрашивать его в цикле значило бы сжечь rate limit на одну и ту же
     # страницу. Один запрос на отчёт.
     topic_fields = topics_mod.topic_fields(client) if want_team else {}
-    topic_rows = []
+    # case_id -> тема, по ВСЕМ отвеченным обращениям. Сводку собираем не здесь,
+    # а после аудита: «по вине или нет» для критичных известно только оттуда.
+    topic_of = {}
     buckets = {"light": [], "medium": [], "critical": []}
     answered = 0
     for case in client.iter_cases(from_time=from_time, to_time=to_time,
@@ -106,8 +108,7 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
         # без знаменателя «сколько всего обращений этой темы» топ просрочек
         # покажет просто самые частые темы, а не самые тяжёлые.
         if topic_fields:
-            topic_rows.append((topics_mod.case_topic(case, topic_fields),
-                               cat is not None))
+            topic_of[case.get("case_id")] = topics_mod.case_topic(case, topic_fields)
         if cat is None:
             continue
         buckets[cat].append({
@@ -222,7 +223,16 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
         result["load"] = load
         # Разрез по темам — менеджерский: он отвечает на вопрос «какие вопросы
         # команда не тянет», а это про обучение и базу знаний, не про сотрудника.
-        result["topics"] = topics_mod.summary(topic_rows) if topic_fields else None
+        # Лёгкие (15–20 мин) целиком идут в «по вине»: их не аудируют поштучно,
+        # это мелкие личные превышения. Из критичных — только те, что аудит
+        # признал личными; унаследованные из очереди в «по вине» не идут.
+        blamed = ({c["case_id"] for c in buckets["light"]}
+                  | {v["case_id"] for v in personal})
+        all_viol = ({c["case_id"] for c in buckets["light"]}
+                    | {c["case_id"] for c in buckets["critical"]})
+        result["topics"] = topics_mod.summary(
+            [(t, cid in all_viol, cid in blamed) for cid, t in topic_of.items()]
+        ) if topic_fields else None
         result["team_no_responsible"] = {
             "live": live_snapshot(client),
             "period": period_breakdown(client, from_time, to_time),
@@ -385,13 +395,20 @@ def topic_lines(t, limit=TOPIC_ROWS_LIMIT):
     if not rows:
         out.append("Ни одной просрочки в размеченных обращениях.")
         return out
-    width = max(len(x["topic"]) for x in rows)
+    width = max([len(x["topic"]) for x in rows] + [len("тема")])
     out.append("```")
+    # Две колонки, а не одна: «всего» — сколько по теме ждали клиенты (это про
+    # очередь), «по вине» — что относится к самому оператору. Полоса рисуется
+    # по вине: смешать их значило бы выдать чужую очередь за его просрочки.
+    out.append(f"{'тема':<{width}}  обр  всего  по вине")
     for x in rows:
-        share = round((x["violation_rate"] or 0) * 100)
-        out.append(f"{x['topic']:<{width}}  {x['violations']:>3} из {x['cases']:<4} "
-                   f"{bar(share, width=14)} {share}%")
+        share = round((x["personal_rate"] or 0) * 100)
+        out.append(f"{x['topic']:<{width}}  {x['cases']:>3}  {x['violations']:>5}  "
+                   f"{x['personal']:>3}  {bar(share, width=12)} {share}%")
     out.append("```")
+    out.append("_«всего» — все просрочки по теме, включая унаследованные из "
+               "очереди; «по вине» — после аудита. Полоса — доля по вине "
+               "внутри темы._")
     # Обрезали список — говорим об этом. Молча показанные 8 строк читаются как
     # «вот все темы с просрочками», и хвост исчезает бесследно.
     if len(rows_all) > len(rows):
@@ -529,6 +546,17 @@ def _num(s):
         return 0.0
 
 
+def auto_html_name(staff, from_time, to_time, view):
+    """Имя файла для --html без пути: кто, за какой период, какой вид.
+
+    Пробелы и пунктуация в имени заменяются на подчёркивания (буквы, в том числе
+    кириллические, остаются). В имя идут ОБЕ границы периода и вид отчёта —
+    иначе отчёты за разные недели молча перезаписывали бы друг друга.
+    """
+    slug = "".join(ch if ch.isalnum() else "_" for ch in staff).strip("_").lower()
+    return f"kpi_{slug or 'staff'}_{from_time[:10]}_{to_time[:10]}_{view}.html"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--staff", required=True, help="имя или staff_id сотрудника")
@@ -537,8 +565,9 @@ def main():
     ap.add_argument("--view", choices=["personal", "manager"], default="manager")
     ap.add_argument("--cache", action="store_true")
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--html", metavar="PATH",
-                    help="записать отчёт красивой HTML-страницей в файл (открыть в браузере)")
+    ap.add_argument("--html", metavar="PATH", nargs="?", const="",
+                    help="дополнительно записать отчёт HTML-страницей. Без "
+                         "пути имя собирается само: reports/<сотрудник>_<период>.html")
     args = ap.parse_args()
 
     client = OmniClient(cache=args.cache)
@@ -551,9 +580,14 @@ def main():
     if args.json:
         print(json.dumps(r, ensure_ascii=False, indent=2))
         return
-    if args.html:
+    if args.html is not None:
         import os
         from report_html import render_html
+        # Пустая строка = флаг дали без пути. Собираем имя сами, чтобы отчёты не
+        # перезаписывали друг друга: в имени и сотрудник, и обе границы периода.
+        if not args.html:
+            args.html = os.path.join("reports", auto_html_name(
+                staff_name, args.from_time, args.to_time, args.view))
         parent = os.path.dirname(os.path.abspath(args.html))
         os.makedirs(parent, exist_ok=True)
         with open(args.html, "w", encoding="utf-8") as f:

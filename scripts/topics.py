@@ -68,37 +68,55 @@ def case_topic(case, fields):
 
 
 def summary(rows):
-    """Сводка по темам. `rows` — список (тема или None, нарушение ли это).
+    """Сводка по темам. `rows` — список (тема или None, просрочка ли, по вине ли).
 
-    Возвращает охват и таблицу «тема -> сколько всего, сколько просрочек, доля».
-    Доля просрочек считается внутри темы (просрочки / обращения этой темы) —
-    она отвечает на вопрос «какие темы даются тяжелее», и в отличие от доли от
-    всего потока не зависит от того, насколько полно размечен период.
+    Просрочки разделены на ВСЕ и ПО ВИНЕ, и это не косметика. Большая часть
+    просрочек — унаследованные: обращение висело в общей очереди без
+    ответственного, а оператор его разобрал, и Омнидеск записал всё ожидание на
+    него. Если смешать их в одну колонку, тема с длинной очередью прочитается
+    как тема, которую оператор не тянет, — то есть разрез начнёт отвечать не на
+    тот вопрос, ради которого сделан.
+
+    Обе колонки нужны, потому что вопросы разные:
+      * все просрочки в теме — сколько по этой теме ждали КЛИЕНТЫ (про процесс
+        и укомплектованность очереди);
+      * по вине — что относится к самому оператору (про обучение и подсказки).
+
+    Доли считаются внутри темы (просрочки / обращения этой темы), а не от всего
+    потока: так число не зависит от того, насколько полно размечен период.
     """
     total = len(rows)
-    tagged = [(t, v) for t, v in rows if t]
-    per = collections.defaultdict(lambda: {"cases": 0, "violations": 0})
-    for topic, is_viol in tagged:
+    tagged = [r for r in rows if r[0]]
+    per = collections.defaultdict(
+        lambda: {"cases": 0, "violations": 0, "personal": 0})
+    for topic, is_viol, is_personal in tagged:
         per[topic]["cases"] += 1
         if is_viol:
             per[topic]["violations"] += 1
+        if is_personal:
+            per[topic]["personal"] += 1
     items = []
     for topic, v in per.items():
         items.append({
             "topic": topic,
             "cases": v["cases"],
             "violations": v["violations"],
+            "personal": v["personal"],
             "violation_rate": round(v["violations"] / v["cases"], 3) if v["cases"] else None,
+            "personal_rate": round(v["personal"] / v["cases"], 3) if v["cases"] else None,
         })
-    # Сортируем по числу просрочек: отчёт отвечает на вопрос «где болит», а не
-    # «чего больше всего». При равенстве — по объёму, чтобы порядок был устойчив.
-    items.sort(key=lambda x: (-x["violations"], -x["cases"], x["topic"]))
+    # Сортируем по просрочкам ПО ВИНЕ: отчёт отвечает на вопрос «где болит у
+    # оператора», а не «чего больше всего». Дальше — по всем просрочкам, чтобы
+    # темы с нулём по вине шли в осмысленном порядке, а не как придётся.
+    items.sort(key=lambda x: (-x["personal"], -x["violations"], -x["cases"],
+                              x["topic"]))
     coverage = round(len(tagged) / total, 3) if total else 0.0
     return {
         "cases_total": total,
         "cases_tagged": len(tagged),
         "coverage": coverage,
         "low_coverage": coverage < MIN_COVERAGE,
-        "untagged_violations": sum(1 for t, v in rows if not t and v),
+        "untagged_violations": sum(1 for t, v, _ in rows if not t and v),
+        "untagged_personal": sum(1 for t, _, p in rows if not t and p),
         "topics": items,
     }

@@ -246,8 +246,10 @@ def _topics_card(t, limit=8):
     rows = rows_all[:limit]
     body = "".join(
         f"<tr><td>{_esc(x['topic'])}</td>"
-        f"<td class=num>{_esc(x['violations'])} из {_esc(x['cases'])}</td>"
-        f"<td class=num>{round((x['violation_rate'] or 0) * 100)}%</td></tr>"
+        f"<td class=num>{_esc(x['cases'])}</td>"
+        f"<td class=num>{_esc(x['violations'])}</td>"
+        f"<td class=num>{_esc(x['personal'])}</td>"
+        f"<td class=num>{round((x['personal_rate'] or 0) * 100)}%</td></tr>"
         for x in rows)
     warn = ""
     if t.get("low_coverage"):
@@ -262,8 +264,12 @@ def _topics_card(t, limit=8):
     return ("<div class=card><h2>Просрочки по темам</h2>"
             f"<p class=hint>Размечено {_esc(t['cases_tagged'])} из "
             f"{_esc(t['cases_total'])} обращений ({pct}%).</p>{warn}"
-            "<table><thead><tr><th>Тема</th><th class=num>Просрочек</th>"
-            f"<th class=num>Доля</th></tr></thead><tbody>{body}</tbody></table>{more}</div>")
+            "<table><thead><tr><th>Тема</th><th class=num>Обращений</th>"
+            "<th class=num>Просрочек всего</th><th class=num>По вине</th>"
+            f"<th class=num>Доля по вине</th></tr></thead><tbody>{body}</tbody>"
+            "</table><p class=hint>«Просрочек всего» включает унаследованные из "
+            "очереди — по ним ждали клиенты, но вины оператора нет. «По вине» — "
+            f"после аудита.</p>{more}</div>")
 
 
 def render_html(r, view="manager"):

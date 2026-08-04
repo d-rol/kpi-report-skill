@@ -457,31 +457,52 @@ check("неизвестный вариант не теряется",
       topics.case_topic({"custom_fields": {"cf_4101": "9"}}, tf), "9")
 
 # 10 обращений: 6 размечены (2 темы), 4 без темы — и среди безтемных есть просрочка.
-rows = ([("Не работает", True)] * 2 + [("Не работает", False)] * 2
-        + [("Возврат денег", True)] * 1 + [("Возврат денег", False)] * 1
-        + [(None, True)] * 1 + [(None, False)] * 3)
+# Строка = (тема, просрочка ли, по вине ли). У «Не работает» 2 просрочки, но по
+# вине только 1 — вторая унаследована из очереди.
+rows = ([("Не работает", True, True)] + [("Не работает", True, False)]
+        + [("Не работает", False, False)] * 2
+        + [("Возврат денег", True, False)] + [("Возврат денег", False, False)]
+        + [(None, True, True)] + [(None, False, False)] * 3)
 s = topics.summary(rows)
 check("охват считается от всех обращений", s["coverage"], 0.6)
 check("низкий охват поднимает флаг", s["low_coverage"], True)
 check("просрочки без темы не теряются", s["untagged_violations"], 1)
+check("просрочки по вине без темы не теряются", s["untagged_personal"], 1)
 # Доля внутри темы, а не доля темы в потоке: 2 просрочки из 4 обращений темы.
 check("доля просрочек внутри темы", s["topics"][0]["violation_rate"], 0.5)
-check("сортировка по числу просрочек", [x["topic"] for x in s["topics"]],
+# Главное свойство разреза: унаследованная просрочка НЕ идёт в вину. Если бы
+# считали одной колонкой, чужая очередь читалась бы как провал оператора.
+check("унаследованное не попало в вину", s["topics"][0]["personal"], 1)
+check("всего просрочек по теме считается отдельно",
+      s["topics"][0]["violations"], 2)
+check("доля по вине меньше доли всех просрочек",
+      s["topics"][0]["personal_rate"], 0.25)
+check("сортировка по просрочкам ПО ВИНЕ", [x["topic"] for x in s["topics"]],
       ["Не работает", "Возврат денег"])
 check("безтемные в список тем не попали", len(s["topics"]), 2)
+
+# Тема, где просрочки есть, но все унаследованные: по вине ноль, и это должно
+# быть видно, а не выглядеть как отсутствие просрочек.
+only_inherited = topics.summary([("Очередь", True, False)] * 3
+                                + [("Очередь", False, False)] * 7)
+check("тема без личной вины: по вине 0", only_inherited["topics"][0]["personal"], 0)
+check("тема без личной вины: просрочки видны",
+      only_inherited["topics"][0]["violations"], 3)
+check("тема без личной вины: строка не пропала",
+      "Очередь" in "\n".join(report.topic_lines(only_inherited)), True)
 
 line = "\n".join(report.topic_lines(s))
 check("охват назван в рендере", "размечено 6 из 10 обращений, 60%" in line, True)
 check("при низком охвате — оговорка вслух", "Разметка неполная" in line, True)
 
 # Полный охват: оговорки быть не должно, иначе она обесценится.
-s_full = topics.summary([("Не работает", True), ("Не работает", False)])
+s_full = topics.summary([("Не работает", True, True), ("Не работает", False, False)])
 check("полный охват: флага нет", s_full["low_coverage"], False)
 check("полный охват: без оговорки",
       "Разметка неполная" in "\n".join(report.topic_lines(s_full)), False)
 
 # Ничего не размечено — это НЕ «тем не было». Должно звучать по-другому.
-s_none = topics.summary([(None, True)] * 5)
+s_none = topics.summary([(None, True, True)] * 5)
 line = "\n".join(report.topic_lines(s_none))
 check("нет разметки: сказано словами", "тем не проставил" in line, True)
 check("нет разметки: не выдаём пустой топ", "```" in line, False)
@@ -490,7 +511,7 @@ check("тем нет (personal): строк нет", report.topic_lines(None), [
 
 # Обрезка списка обязана быть видимой: молча показанные N строк читаются как
 # «вот все темы», и хвост исчезает бесследно.
-many = topics.summary([(f"Тема {i}", True) for i in range(12)])
+many = topics.summary([(f"Тема {i}", True, True) for i in range(12)])
 line = "\n".join(report.topic_lines(many, limit=8))
 check("обрезка названа вслух", "из 12 с просрочками" in line, True)
 check("без обрезки — молчим", "Показаны" in "\n".join(report.topic_lines(s_full)), False)
