@@ -79,6 +79,14 @@ FMT = "%Y-%m-%d %H:%M:%S"
 DATA_START = None
 # Меньше этого числа суток — база статистически пустая, честнее не считать.
 MIN_BASELINE_DAYS = 7.0
+# Глубина базы по умолчанию. Четыре недели — компромисс: короче окно шумит,
+# длиннее тянет в базу устаревшую картину потока.
+DEFAULT_BASELINE_WEEKS = 4
+# Час считается всплеском, если обращений и в разы больше обычного, И их вообще
+# заметное число: 3 обращения ночью против «обычных 1.2» дают x2.5 на пустом
+# месте, поэтому одного отношения мало.
+SPIKE_MIN_CASES = 5
+SPIKE_RATIO = 1.5
 
 
 def bucket_key(weekday, hour):
@@ -148,7 +156,7 @@ def _collect(client, start, end):
     return total, answered, earliest, by_week
 
 
-def build_baseline(client, end, weeks=4, online=1, since=None):
+def build_baseline(client, end, weeks=DEFAULT_BASELINE_WEEKS, online=1, since=None):
     """Средний поток на (день недели, час) за `weeks` недель до `end`.
 
     Окно обрезается снизу дважды:
@@ -307,7 +315,7 @@ def compare(client, from_time, to_time, baseline):
         exp = per_hour.get(hour, per_hour.get(str(hour), 0.0)) * n
         act = total.get(key, 0)
         # Порог по абсолютному числу: 3 обращения ночью — не всплеск, а шум.
-        if act >= 5 and exp > 0 and act / exp >= 1.5:
+        if act >= SPIKE_MIN_CASES and exp > 0 and act / exp >= SPIKE_RATIO:
             spikes.append({
                 "weekday": WD_NAMES[wd], "hour": hour,
                 "actual": act, "expected": round(exp, 1),
@@ -370,7 +378,7 @@ def resolve_online(client, baseline, from_time, to_time, online="auto"):
                  "обращений — в делитель не пошли)"), rst
 
 
-def context(client, from_time, to_time, weeks=4, since=None):
+def context(client, from_time, to_time, weeks=DEFAULT_BASELINE_WEEKS, since=None):
     """Компактный контекст нагрузки для отчёта: поток был обычный или нет.
 
     Полная картина (профиль по часам, разбивка по дням) остаётся в main() — она
@@ -429,7 +437,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--from", dest="from_time", help="начало сравниваемого периода 'YYYY-MM-DD HH:MM:SS' (МСК)")
     ap.add_argument("--to", dest="to_time", help="конец сравниваемого периода")
-    ap.add_argument("--weeks", type=int, default=4, help="глубина базы в неделях (по умолчанию 4)")
+    ap.add_argument("--weeks", type=int, default=DEFAULT_BASELINE_WEEKS,
+                    help=f"глубина базы в неделях (по умолчанию {DEFAULT_BASELINE_WEEKS})")
     ap.add_argument("--online", default="auto",
                     help="сколько операторов работает одновременно: число или "
                          "'auto' (по умолчанию) — вывести из графика смен, "

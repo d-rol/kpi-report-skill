@@ -44,6 +44,11 @@ except AttributeError:
 ACTIVE_STATUSES = ("open", "waiting")          # ещё в работе / ждут
 CLOSED_STATUSES = ("closed", "spam", "deleted")  # завершены
 
+# С какого возраста взятое в работу обращение без первого ответа считается
+# забытым. Сутки — заведомо больше любой рабочей смены: всё, что дольше, уже
+# нельзя объяснить «занят прямо сейчас».
+FORGOTTEN_MIN_AGE_HOURS = 24.0
+
 
 def had_reply(case):
     spd = case.get("first_response_speed")
@@ -79,7 +84,7 @@ def live_snapshot(client):
     }
 
 
-def forgotten_in_work(client, min_age_hours=24.0):
+def forgotten_in_work(client, min_age_hours=FORGOTTEN_MIN_AGE_HOURS):
     """Живой снимок «забытых в работе»: обращение ВЗЯТО (есть ответственный,
     staff_id != 0), но первого ответа до сих пор нет и оно висит дольше порога.
 

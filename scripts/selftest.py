@@ -47,6 +47,9 @@ import load_baseline as lb
 import report
 import audit_critical
 import topics
+import settings
+import no_responsible
+import sla_violations
 
 MSK = lb.MSK
 FAILED = []
@@ -491,6 +494,40 @@ many = topics.summary([(f"Тема {i}", True) for i in range(12)])
 line = "\n".join(report.topic_lines(many, limit=8))
 check("обрезка названа вслух", "из 12 с просрочками" in line, True)
 check("без обрезки — молчим", "Показаны" in "\n".join(report.topic_lines(s_full)), False)
+
+# --------------------------------------------------------------------------
+section("Список референсных значений")
+# --------------------------------------------------------------------------
+# settings.py показывает, на чём стоит расчёт. Ценность у него ровно одна —
+# он не должен отставать от кода. Две проверки ниже и есть эта гарантия:
+# первая ловит переименованную константу, вторая — добавленную и не внесённую
+# в список. Без второй список тихо станет неполным, а неполный список врёт
+# увереннее, чем его отсутствие.
+cfg = settings.collect()
+listed = {(i["source"], i["name"])
+          for g in cfg["groups"] for i in g["items"]}
+check("список собирается и значения читаются", len(listed) >= 15, True)
+
+# Технические константы (таймзона, форматы, имена файлов, регулярки) настройками
+# не являются — их в списке быть не должно, иначе он утонет в шуме.
+NOT_SETTINGS = {"MSK", "FMT", "WD_NAMES", "CONFIG_NAME", "ASSIGN_EVENTS",
+                "ACTIVE_STATUSES", "CLOSED_STATUSES", "TOPIC_RE", "REQUIRED_KEYS"}
+missed = []
+for mod in (sla_violations, audit_critical, lb, shifts, calibration, topics,
+            no_responsible):
+    for name in dir(mod):
+        if not name.isupper() or name in NOT_SETTINGS:
+            continue
+        if (f"{mod.__name__}.py", name) not in listed:
+            missed.append(f"{mod.__name__}.{name}")
+check("новых порогов мимо списка нет", missed, [])
+
+# Рабочее окно задано в ДВУХ модулях независимо. Если развести их, удержание
+# в аудите и нагрузка на оператора начнут считаться по разным суткам, и обе
+# цифры останутся правдоподобными — поэтому расхождение ловим тестом.
+check("рабочее окно совпадает в аудите и нагрузке",
+      (audit_critical.WORK_START_H, audit_critical.WORK_END_H),
+      (lb.WORK_START, lb.WORK_END))
 
 # --------------------------------------------------------------------------
 print(f"\n{'=' * 60}")
