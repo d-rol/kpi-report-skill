@@ -35,6 +35,7 @@ import report
 import calibration
 import load_baseline
 import no_responsible
+import setup_check
 import sla_violations
 import audit_critical
 
@@ -127,6 +128,14 @@ GROUPS = [
          "Сколько тем показывать. Скрытое число называется вслух, полный "
          "список остаётся в --json.",
          INSTALL),
+    ]),
+    ("Проверка установки", [
+        (setup_check, "MIGRATION_RATIO", "раз",
+         "Во сколько раз поток последней недели должен превышать первую, "
+         "чтобы setup_check заподозрил постепенный переезд в Omnidesk и "
+         "спросил про нижнюю границу данных. Порог только поднимает "
+         "вопрос, сам ничего не решает.",
+         DERIVED),
     ]),
     ("Очередь и забытые обращения", [
         (no_responsible, "FORGOTTEN_MIN_AGE_HOURS", "часов",

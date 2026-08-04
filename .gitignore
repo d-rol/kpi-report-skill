@@ -21,3 +21,6 @@ scripts/shifts.json
 *_render.md
 *_err.txt
 *.html
+
+# Отметка «первичная проверка установки пройдена» — локальная.
+scripts/.setup_done

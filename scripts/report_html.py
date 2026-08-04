@@ -80,7 +80,10 @@ body {
   font-size: 11.5px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase;
   background: var(--good-bg); color: var(--good);
 }
-.head .badge.manager { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.head .badge.manager { background: var(--warn-bg); color: var(--accent); }
+@supports (background: color-mix(in srgb, red 10%, transparent)) {
+  .head .badge.manager { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+}
 .card {
   background: var(--card); border: 1px solid var(--border); border-radius: 14px;
   padding: 18px 20px; margin-bottom: 16px; box-shadow: var(--shadow);

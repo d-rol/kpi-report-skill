@@ -51,6 +51,7 @@ import settings
 import no_responsible
 import sla_violations
 import backlog
+import setup_check
 
 MSK = lb.MSK
 FAILED = []
@@ -603,10 +604,11 @@ check("список собирается и значения читаются", 
 # Технические константы (таймзона, форматы, имена файлов, регулярки) настройками
 # не являются — их в списке быть не должно, иначе он утонет в шуме.
 NOT_SETTINGS = {"MSK", "MSK_TZ", "FMT", "WD_NAMES", "CONFIG_NAME", "ASSIGN_EVENTS",
-                "ACTIVE_STATUSES", "CLOSED_STATUSES", "TOPIC_RE", "REQUIRED_KEYS"}
+                "ACTIVE_STATUSES", "CLOSED_STATUSES", "TOPIC_RE", "REQUIRED_KEYS",
+                "OK", "ASK", "LOOK"}
 missed = []
 for mod in (sla_violations, audit_critical, lb, shifts, calibration, topics,
-            no_responsible):
+            no_responsible, setup_check):
     for name in dir(mod):
         if not name.isupper() or name in NOT_SETTINGS:
             continue
@@ -621,6 +623,19 @@ check("новых порогов мимо списка нет", missed, [])
 check("рабочее окно совпадает в аудите и нагрузке",
       (audit_critical.WORK_START_H, audit_critical.WORK_END_H),
       (lb.WORK_START, lb.WORK_END))
+# Единственное суждение в проверке установки: отличить постепенный переезд от
+# роста. Ошибка тут дорогая в обе стороны — пропустим переезд, и база нагрузки
+# покажет мнимый рост; поднимем ложную тревогу, и человек зря сдвинет границу.
+check("переезд заподозрен: рост в 5 раз",
+      setup_check.migration_suspected(23.0, 123.7), True)
+check("ровный поток вопроса не поднимает",
+      setup_check.migration_suspected(100.0, 120.0), False)
+check("ровно на пороге — уже вопрос",
+      setup_check.migration_suspected(50.0, 100.0), True)
+# Пустая история не должна выглядеть как переезд: делить не на что.
+check("нет данных — не переезд", setup_check.migration_suspected(0, 120.0), False)
+check("нет свежих данных — не переезд", setup_check.migration_suspected(20.0, 0), False)
+
 check("ночная очередь берёт окно аудита, а не своё",
       (backlog.WORK_START, backlog.WORK_END),
       (audit_critical.WORK_START_H, audit_critical.WORK_END_H))
