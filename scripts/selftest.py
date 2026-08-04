@@ -602,7 +602,7 @@ check("список собирается и значения читаются", 
 
 # Технические константы (таймзона, форматы, имена файлов, регулярки) настройками
 # не являются — их в списке быть не должно, иначе он утонет в шуме.
-NOT_SETTINGS = {"MSK", "FMT", "WD_NAMES", "CONFIG_NAME", "ASSIGN_EVENTS",
+NOT_SETTINGS = {"MSK", "MSK_TZ", "FMT", "WD_NAMES", "CONFIG_NAME", "ASSIGN_EVENTS",
                 "ACTIVE_STATUSES", "CLOSED_STATUSES", "TOPIC_RE", "REQUIRED_KEYS"}
 missed = []
 for mod in (sla_violations, audit_critical, lb, shifts, calibration, topics,

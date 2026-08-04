@@ -49,6 +49,9 @@ try:
 except AttributeError:
     pass
 
+# Омнидеск живёт в МСК; окно «--days N» считаем в нём же, а не в поясе машины.
+MSK_TZ = dt.timezone(dt.timedelta(hours=3))
+
 HELD_SLA_MIN = 15.0  # если оператор ответил в пределах SLA с момента владения — не его вина
 # Личное нарушение с небольшим удержанием — пограничное: оператор владел дольше SLA,
 # но недолго (часто авто-упавший чат в момент параллельной загрузки). Такие не судим
@@ -240,7 +243,9 @@ def main():
     args = ap.parse_args()
 
     if args.days:
-        now = dt.datetime.now()
+        # Время МСК, а не машинное: Омнидеск ждёт даты в МСК, и на ноутбуке в
+        # другом поясе «--days 7» молча съезжало бы на разницу часовых поясов.
+        now = dt.datetime.now(MSK_TZ)
         from_time = (now - dt.timedelta(days=args.days)).strftime("%Y-%m-%d %H:%M:%S")
         to_time = now.strftime("%Y-%m-%d %H:%M:%S")
     else:

@@ -28,6 +28,9 @@ try:
 except AttributeError:
     pass
 
+# Омнидеск живёт в МСК; окно «--days N» считаем в нём же, а не в поясе машины.
+MSK_TZ = dt.timezone(dt.timedelta(hours=3))
+
 SLA_MINUTES = 15.0
 CRITICAL_MINUTES = 20.0   # первый ответ дольше 20 мин => критично
 
@@ -69,7 +72,9 @@ def main():
     args = ap.parse_args()
 
     if args.days:
-        now = dt.datetime.now()
+        # Время МСК, а не машинное: Омнидеск ждёт даты в МСК, и на ноутбуке в
+        # другом поясе «--days 7» молча съезжало бы на разницу часовых поясов.
+        now = dt.datetime.now(MSK_TZ)
         from_time = (now - dt.timedelta(days=args.days)).strftime("%Y-%m-%d %H:%M:%S")
         to_time = now.strftime("%Y-%m-%d %H:%M:%S")
     else:
