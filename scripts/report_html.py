@@ -408,9 +408,22 @@ def _render_manager(r):
         rows = "".join(_case_row(r, v, with_link=False) for v in inh[:12])
         more = (f"<p class=hint>…и ещё {len(inh) - 12} (полный список — флаг --json).</p>"
                 if len(inh) > 12 else "")
+        kinds = {}
+        for v in inh:
+            k = v.get("arrival") or "normal"
+            kinds[k] = kinds.get(k, 0) + 1
+        labels = {"night": "ночная очередь", "drain": "разбор ночной очереди",
+                  "normal": "обычное время"}
+        origin = ", ".join(f"{labels[k]} — {n}"
+                           for k, n in sorted(kinds.items(), key=lambda x: -x[1]))
         parts.append(
             "<div class=card><details><summary>Унаследованные критичные — "
             f"{len(inh)} шт (не в вину; «разобрал зависшее»)</summary>"
+            "<p class=hint>Omnidesk записал ожидание на того, кто ответил, хотя "
+            "во время ожидания обращение было ничьим. Аудит смотрит, когда "
+            "оператор стал владельцем: если он ответил в пределах SLA с этого "
+            "момента — задержка не его. «Держал 0.0 мин» = взял и ответил сразу.</p>"
+            f"<p class=hint>Откуда пришли: {_esc(origin)}.</p>"
             "<table><thead><tr><th>Обращение</th><th class=num>Первый ответ</th>"
             "<th class=num>Держал</th><th>Источник</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>{more}</details></div>"

@@ -553,11 +553,25 @@ def render_manager(r):
         inh = sorted(r["inherited_critical_cases"], key=lambda x: -x["first_response_min"])
         out.append(f"\n<details><summary>Унаследованные критичные — {len(inh)} шт "
                    f"(не в вину; «разобрал зависшее»)</summary>\n")
+        out.append("_Омнидеск записал ожидание на того, кто ответил, хотя во время "
+                   "ожидания обращение было ничьим. Аудит смотрит, когда оператор "
+                   "стал владельцем: если он ответил в пределах SLA с этого момента "
+                   "— задержка не его. «Держал 0.0 мин» = взял и ответил сразу._")
+        # Откуда они взялись. Без этой строки десятки одинаковых «из общей очереди»
+        # не отвечают на главный вопрос — почему обращение столько ждало.
+        kinds = {}
+        for v in inh:
+            k = v.get("arrival") or backlog.NORMAL
+            kinds[k] = kinds.get(k, 0) + 1
+        parts = [f"{backlog.KIND_LABELS[k]} — {n}"
+                 for k, n in sorted(kinds.items(), key=lambda x: -x[1])]
+        out.append(f"\nОткуда пришли: {', '.join(parts)}.\n")
         out.append("| Обращение | Первый ответ | Держал | Источник |")
         out.append("|---|--:|--:|---|")
         for v in inh[:12]:
             held = "—" if v.get("held_min") is None else f"{v['held_min']} мин"
-            out.append(f"| {case_link(r, v)} | {v['first_response_min']} мин | {held} | {v['reason']} |")
+            out.append(f"| {case_link(r, v)} | {v['first_response_min']} мин | {held} "
+                       f"| {v['reason']}{arrival_note(v)} |")
         if len(inh) > 12:
             out.append(f"\n…и ещё {len(inh) - 12} (полный список — флаг `--json`).")
         out.append("\n</details>")
