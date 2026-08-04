@@ -558,8 +558,10 @@ def main():
         os.makedirs(parent, exist_ok=True)
         with open(args.html, "w", encoding="utf-8") as f:
             f.write(render_html(r, args.view))
-        print(f"HTML-отчёт записан: {args.html}")
-        return
+        # В stderr, а не в stdout: HTML — это ДОПОЛНИТЕЛЬНЫЙ вывод, обычный
+        # рендер ниже никуда не девается, и служебная строка не должна попадать
+        # в него, если stdout перенаправляют в файл.
+        print(f"HTML-отчёт записан: {args.html}", file=sys.stderr)
     print(render_manager(r) if args.view == "manager" else render_personal(r))
 
 
