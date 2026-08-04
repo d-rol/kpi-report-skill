@@ -623,6 +623,29 @@ check("новых порогов мимо списка нет", missed, [])
 check("рабочее окно совпадает в аудите и нагрузке",
       (audit_critical.WORK_START_H, audit_critical.WORK_END_H),
       (lb.WORK_START, lb.WORK_END))
+# Образец отчёта в examples/ собирается генератором. Ценность у него ровно та же,
+# что у списка настроек: он не должен отставать от кода. Сверяем свежий рендер с
+# закоммиченным — устареть молча образец не сможет, а устаревший образец учит
+# формату, которого код уже не производит.
+try:
+    import make_example
+    ex_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "examples")
+    fresh = make_example.render_all()
+    stale = []
+    for _name, _body in fresh.items():
+        try:
+            with open(os.path.join(ex_dir, _name), encoding="utf-8") as _f:
+                if _f.read().replace("\r\n", "\n") != _body.replace("\r\n", "\n"):
+                    stale.append(_name)
+        except FileNotFoundError:
+            stale.append(f"{_name} (нет файла)")
+    check("образец отчёта не устарел", stale, [])
+    check("образец собран на выдуманных данных",
+          "example.omnidesk.ru" in fresh["report_manager.md"], True)
+except Exception as _e:                       # noqa: BLE001 — падение генератора тоже дефект
+    check("генератор образца работает", f"{type(_e).__name__}: {_e}", "без ошибок")
+
 # Единственное суждение в проверке установки: отличить постепенный переезд от
 # роста. Ошибка тут дорогая в обе стороны — пропустим переезд, и база нагрузки
 # покажет мнимый рост; поднимем ложную тревогу, и человек зря сдвинет границу.

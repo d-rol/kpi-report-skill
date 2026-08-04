@@ -101,11 +101,29 @@ scripts/
   report_html.py       — опциональный HTML-рендер отчёта
   settings.py         — все референсные значения расчёта одним списком
   setup_check.py      — проверка установки перед первым отчётом
+  make_example.py     — генератор образца отчёта в examples/
   selftest.py         — оффлайн-самопроверка логики (без сети и токена)
+examples/
+  report_manager.md    — образец отчёта руководителю (выдуманные данные)
+  report_personal.md   — образец личного отчёта
+  report_manager.html  — тот же отчёт HTML-страницей
 .claude/skills/kpi-report/
   SKILL.md             — инструкция для Claude Code Skill
   evals/evals.json     — тестовые сценарии для проверки скилла
 ```
+
+## Как выглядит отчёт
+
+Смотреть, ничего не настраивая: [examples/report_manager.md](examples/report_manager.md)
+(отчёт руководителю), [examples/report_personal.md](examples/report_personal.md)
+(что видит сотрудник) и [examples/report_manager.html](examples/report_manager.html)
+(HTML-страница — один файл, без внешних зависимостей).
+
+Данные в образцах **выдуманы**: они собираются на подставном клиенте, а не
+вычищаются из чьего-то настоящего отчёта. При этом проходят через настоящий
+`report.gather()` и настоящие рендеры, поэтому показывают ровно тот формат,
+который выдаёт код. Пересобрать: `python scripts/make_example.py`; расхождение
+образца с рендером ловит `selftest.py`, так что устареть молча он не может.
 
 ## Перед первым отчётом
 
