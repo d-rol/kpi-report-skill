@@ -233,6 +233,37 @@ def _load_card(load):
             f"{_esc(lpo.get('work_window'))}.</p>{note}</div>")
 
 
+def _backlog_card(b):
+    """Сколько просрочек порождено ночной очередью, а не работой в смене."""
+    if not b or not b.get("violations_total"):
+        return ""
+    k = b["kinds"]
+    rows = "".join(
+        f"<tr><td>{_esc(k[n]['label'])}</td>"
+        f"<td class=num>{_esc(k[n]['cases'])}</td>"
+        f"<td class=num>{_esc(k[n]['violations'])}</td>"
+        f"<td class=num>{round((k[n]['rate'] or 0) * 100)}%</td></tr>"
+        for n in ("night", "drain", "normal"))
+    d = b.get("drain_minutes") or {}
+    note = ""
+    if d:
+        note = ("<p class=hint>Ночью смены нет, и часы SLA по всей ночной пачке "
+                "стартуют с открытием смены одновременно — уложиться в норматив "
+                "может только первая горстка. Пока её разбирают (медиана "
+                f"{_esc(d.get('median'))} мин, максимум {_esc(d.get('max'))} мин), "
+                "приходят новые обращения: ответить на них раньше физически "
+                "нельзя. Момент разбора считается по данным, а не задан "
+                "константой.</p>")
+    share = round((b.get("queue_share") or 0) * 100)
+    return ("<div class=card><h2>Ночная очередь</h2>"
+            f"<p>Из <b>{_esc(b['violations_total'])}</b> просрочек команды "
+            f"<b>{_esc(b['violations_from_queue'])}</b> ({share}%) порождены ею, "
+            "а не работой в смене.</p>"
+            "<table><thead><tr><th>Когда пришло</th><th class=num>Обращений</th>"
+            "<th class=num>Просрочек</th><th class=num>Доля</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>{note}</div>")
+
+
 def _topics_card(t, limit=8):
     """Разрез просрочек по темам. Охват называется всегда — см. topics.py."""
     if not t:
@@ -333,6 +364,7 @@ def _render_manager(r):
     # нагрузку здесь прочиталось бы как «поток был обычный», а отсутствие тем —
     # как «просрочки ничем не объединены».
     parts.append(_load_card(r.get("load")))
+    parts.append(_backlog_card(r.get("backlog")))
     parts.append(_topics_card(r.get("topics")))
 
     # Личные критичные — чисто личные (не пограничные).

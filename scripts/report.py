@@ -35,7 +35,7 @@ import argparse
 import datetime as dt
 
 from omni_client import OmniClient
-from sla_violations import parse_speed, classify
+from sla_violations import parse_speed, classify, SLA_MINUTES
 from audit_critical import audit_case
 from no_responsible import live_snapshot, period_breakdown, forgotten_in_work
 from calibration import grace_status, load_config, MSK, FMT as CAL_FMT
@@ -43,6 +43,7 @@ from calibration import grace_status, load_config, MSK, FMT as CAL_FMT
 # это лидерборд, и короткий алиас молча затенил бы модуль.
 import load_baseline
 import topics as topics_mod
+import backlog
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -93,13 +94,21 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
     # case_id -> тема, по ВСЕМ отвеченным обращениям. Сводку собираем не здесь,
     # а после аудита: «по вине или нет» для критичных известно только оттуда.
     topic_of = {}
+    # Приходы по ВСЕЙ команде: ночную очередь разбирает смена целиком, по одному
+    # сотруднику её не посчитать. Собираем в том же проходе и ДО фильтра по
+    # сотруднику — отдельный проход стоил бы ещё столько же запросов к API.
+    team_arrivals = []
     buckets = {"light": [], "medium": [], "critical": []}
     answered = 0
     for case in client.iter_cases(from_time=from_time, to_time=to_time,
                                   show_first_response_time=True):
+        spd = parse_speed(case.get("first_response_speed"))
+        if want_team:
+            came = load_baseline.parse_created(case.get("created_at"))
+            if came is not None:
+                team_arrivals.append((came, spd))
         if case.get("staff_id") != staff_id:
             continue
-        spd = parse_speed(case.get("first_response_speed"))
         if spd is None:
             continue
         answered += 1
@@ -165,6 +174,20 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
             ratio = spike_at.get(load_baseline.bucket_key(d.weekday(), d.hour))
             if ratio:
                 v["spike_ratio"] = ratio
+
+        # Вид прихода: ночная очередь / её разбор / обычное время. Как и всплеск,
+        # вердикт НЕ меняет — но без пометки «держал 40 минут» читается одинаково
+        # и в спокойный день, и когда оператор в этот момент разгребал ночь.
+        drain_ends = backlog.drain_end(team_arrivals)
+        for v in verdicts:
+            created = next((c.get("created_at") for c in buckets["critical"]
+                            if c["case_id"] == v.get("case_id")), None)
+            d = load_baseline.parse_created(created) if created else None
+            if d is None:
+                continue
+            kind = backlog.arrival_kind(d, drain_ends)
+            if kind != backlog.NORMAL:
+                v["arrival"] = kind
 
     # Реальный % просрочек: сырой (всё >15 мин, сходится с Омнидеском) vs
     # аудированный (унаследованное из очереди убрано). Лёгкие (15–20 мин) не
@@ -233,6 +256,7 @@ def gather(client, staff_id, staff_name, from_time, to_time, want_team):
         result["topics"] = topics_mod.summary(
             [(t, cid in all_viol, cid in blamed) for cid, t in topic_of.items()]
         ) if topic_fields else None
+        result["backlog"] = backlog.summary(team_arrivals, SLA_MINUTES)
         result["team_no_responsible"] = {
             "live": live_snapshot(client),
             "period": period_breakdown(client, from_time, to_time),
@@ -368,6 +392,47 @@ def load_lines(load):
     return [line]
 
 
+def arrival_note(v):
+    """Пометка «пришло в ночную очередь / в её разбор» — контекст, не смягчение.
+
+    Без неё просрочка, физически неизбежная (часы всей ночной пачки стартуют
+    в 10:00 одновременно), выглядит так же, как просрочка в спокойный час.
+    """
+    kind = v.get("arrival")
+    return f" · {backlog.KIND_LABELS[kind]}" if kind else ""
+
+
+def backlog_lines(b):
+    """Сколько просрочек порождено ночной очередью, а не работой в смене."""
+    if not b or not b.get("violations_total"):
+        return []
+    k = b["kinds"]
+    night, drain, normal = k["night"], k["drain"], k["normal"]
+    share = round((b.get("queue_share") or 0) * 100)
+    out = [f"\n**Ночная очередь:** из {b['violations_total']} просрочек команды "
+           f"**{b['violations_from_queue']}** ({share}%) порождены ею, а не "
+           f"работой в смене."]
+    out.append("```")
+    out.append(f"{'когда пришло':<24} {'обр':>5} {'просрочек':>10}  доля")
+    for row in (night, drain, normal):
+        rate = round((row["rate"] or 0) * 100)
+        out.append(f"{row['label']:<24} {row['cases']:>5} {row['violations']:>10}  "
+                   f"{bar(rate, width=12)} {rate}%")
+    out.append("```")
+    d = b.get("drain_minutes") or {}
+    if d:
+        out.append(
+            f"_Ночью смены нет, и часы SLA по всей ночной пачке стартуют в "
+            f"{backlog.WORK_START}:00 одновременно — уложиться в норматив может "
+            f"только первая горстка. Пока её разбирают (медиана "
+            f"{d.get('median')} мин, максимум {d.get('max')} мин), приходят новые "
+            f"обращения: ответить на них раньше физически нельзя, и просрочек "
+            f"среди них {round((drain['rate'] or 0) * 100)}% против "
+            f"{round((normal['rate'] or 0) * 100)}% в обычное время. "
+            f"Момент разбора считается по данным, а не задан константой._")
+    return out
+
+
 def topic_lines(t, limit=TOPIC_ROWS_LIMIT):
     """Разрез просрочек по темам обращений.
 
@@ -446,6 +511,7 @@ def render_manager(r):
                f"(унаследовано из очереди {sla['critical_inherited']}).")
 
     out.extend(load_lines(r.get("load")))
+    out.extend(backlog_lines(r.get("backlog")))
     out.extend(topic_lines(r.get("topics")))
 
     personal = r["personal_critical_cases"]
@@ -468,7 +534,7 @@ def render_manager(r):
         for v in clear:
             held = "—" if v.get("held_min") is None else f"{v['held_min']} мин"
             out.append(f"| {case_link(r, v)} | {v['first_response_min']} мин | {held} "
-                       f"| {v['reason']}{spike_note(v)} |")
+                       f"| {v['reason']}{spike_note(v)}{arrival_note(v)} |")
 
     if border:
         out.append("\n### Требует вашей оценки — пограничные")
@@ -479,7 +545,8 @@ def render_manager(r):
         out.append("|---|--:|--:|---|")
         for v in border:
             held = "—" if v.get("held_min") is None else f"{v['held_min']} мин"
-            note = v["reason"] + (" · авто-чат" if v.get("auto_chat") else "") + spike_note(v)
+            note = (v["reason"] + (" · авто-чат" if v.get("auto_chat") else "")
+                    + spike_note(v) + arrival_note(v))
             out.append(f"| {case_link(r, v)} | {v['first_response_min']} мин | {held} | {note} |")
 
     if r["inherited_critical_cases"]:
