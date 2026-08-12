@@ -380,17 +380,23 @@ def load_lines(load):
             # тут было бы неправдой — нет только сравнения с недавним прошлым.
             tail = ("Это про сравнение с недавним прошлым; на вопрос «тяжёлый ли "
                     "период вообще» отвечает норма ниже.")
-        return [f"\n**Нагрузка:** сравнивать не с чем — {load.get('reason')}. "
+        return [f"\n**Нагрузка команды:** сравнивать не с чем — {load.get('reason')}. "
                 + tail] + ref
 
     lpo = load.get("load_per_operator") or {}
     vs_week = (load.get("vs_last_week") or {}).get("ratio")
-    parts = [f"\n**Нагрузка:** пришло {load['actual_cases']} обращений "
+    # «Нагрузка команды», а не просто «Нагрузка»: блок стоит внутри отчёта по
+    # одному сотруднику, и без слова «команды» читается как ЕГО обращения. Это
+    # весь поток за период — на него сотрудник не влияет, и сравнивать его
+    # личные метрики с ним нельзя.
+    parts = [f"\n**Нагрузка команды:** пришло {load['actual_cases']} обращений "
              f"против обычных {load['expected_cases']} (x{load['ratio']} к среднему"]
     if vs_week:
         parts.append(f", x{vs_week} к последней неделе базы")
     parts.append(f"). {lpo.get('cases_per_work_hour')} обращений/час на "
-                 f"{load['online_staff']} оператора в окно {lpo.get('work_window')}.")
+                 f"{load['online_staff']} оператора в окно {lpo.get('work_window')}.  \n"
+                 "_Это весь поток за период по команде, а не обращения этого "
+                 "сотрудника._")
     line = "".join(parts)
     if load.get("clipped_by_data_start"):
         line += (f"  \n_База короткая — {load['baseline_days']} дн вместо "
@@ -418,10 +424,21 @@ def reference_lines(ref):
                else f" → x{ref['ratio']} к норме")
     line = (f"\n**Против нормы:** {ref['actual']} обращений/час на оператора при "
             f"норме {ref['value']}{corridor}{verdict}.")
-    who = ", ".join(x for x in (ref.get("by"), ref.get("decided")) if x)
-    if who:
-        line += f"  \n_Норму задал {who}"
-        line += (f"; замер {ref['measured_on']}._" if ref.get("measured_on") else "._")
+    # Кто поставил число и на каких данных — две РАЗНЫЕ вещи, и путать их нельзя.
+    # Отчёт всегда про конкретного сотрудника, поэтому «норму задал <имя>» рядом
+    # с его метриками читается как «норма посчитана по нему». Норма же считается
+    # по всему потоку команды, а имя — это автор решения.
+    who = ref.get("by")
+    when = ref.get("decided")
+    if who or when:
+        parts_note = ["  \n_Число нормы поставил "]
+        parts_note.append(who or "руководитель")
+        if when:
+            parts_note.append(f" (решение от {when})")
+        if ref.get("measured_on"):
+            parts_note.append(f"; замер — весь поток команды за {ref['measured_on']}")
+        parts_note.append("._")
+        line += "".join(parts_note)
     if ref.get("short_period"):
         line += (f"  \n_Период короче {ref['short_period_days']:.0f} дней: на "
                  "коротком окне состав дней недели перекашивает нагрузку, "

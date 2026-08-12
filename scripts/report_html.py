@@ -235,7 +235,7 @@ def _load_card(load):
         if ref:
             tail = ("Это про сравнение с недавним прошлым; на вопрос «тяжёлый ли "
                     "период вообще» отвечает норма ниже.")
-        return ("<div class=card><h2>Нагрузка</h2>"
+        return ("<div class=card><h2>Нагрузка команды</h2>"
                 f"<p class=hint>Сравнивать не с чем — {_esc(load.get('reason'))}. "
                 f"{tail}</p>{ref}</div>")
     lpo = load.get("load_per_operator") or {}
@@ -246,13 +246,17 @@ def _load_card(load):
         note = (f"<p class=hint>База короткая — {_esc(load['baseline_days'])} дн "
                 f"вместо {_esc(load['baseline_weeks'])} нед: раньше Омнидеск не был "
                 "основным каналом. Сравнение ориентировочное.</p>")
-    return ("<div class=card><h2>Нагрузка</h2>"
+    # «Нагрузка команды» — см. комментарий в report.load_lines: без слова
+    # «команды» блок внутри персонального отчёта читается как обращения этого
+    # сотрудника.
+    return ("<div class=card><h2>Нагрузка команды</h2>"
             f"<p>Пришло <b>{_esc(load['actual_cases'])}</b> обращений против обычных "
             f"<b>{_esc(load['expected_cases'])}</b> (x{_esc(load['ratio'])} к среднему"
             f"{extra}).</p>"
             f"<p class=hint>{_esc(lpo.get('cases_per_work_hour'))} обращений/час на "
             f"{_esc(load['online_staff'])} оператора в окно "
-            f"{_esc(lpo.get('work_window'))}.</p>{note}"
+            f"{_esc(lpo.get('work_window'))}. Это весь поток за период по команде, "
+            f"а не обращения этого сотрудника.</p>{note}"
             f"{_reference_html(load.get('reference'))}</div>")
 
 
@@ -271,10 +275,16 @@ def _reference_html(ref):
                else f" → x{_esc(ref['ratio'])} к норме")
     out = (f"<p>Против нормы: <b>{_esc(ref['actual'])}</b> обращений/час на "
            f"оператора при норме <b>{_esc(ref['value'])}</b>{corridor}{verdict}.</p>")
-    who = ", ".join(x for x in (ref.get("by"), ref.get("decided")) if x)
-    if who:
-        measured = f"; замер {_esc(ref['measured_on'])}" if ref.get("measured_on") else ""
-        out += f"<p class=hint>Норму задал {_esc(who)}{measured}.</p>"
+    # См. комментарий в report.reference_lines: «кто поставил» и «на чьих данных»
+    # — разные вещи, и в отчёте по сотруднику их особенно легко перепутать.
+    who, when = ref.get("by"), ref.get("decided")
+    if who or when:
+        note = f"Число нормы поставил {_esc(who or 'руководитель')}"
+        if when:
+            note += f" (решение от {_esc(when)})"
+        if ref.get("measured_on"):
+            note += f"; замер — весь поток команды за {_esc(ref['measured_on'])}"
+        out += f"<p class=hint>{note}.</p>"
     if ref.get("short_period"):
         out += (f"<p class=hint>Период короче {ref['short_period_days']:.0f} дней: "
                 "на коротком окне состав дней недели перекашивает нагрузку, "
