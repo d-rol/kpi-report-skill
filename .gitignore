@@ -16,6 +16,10 @@ scripts/calibration.json
 # В репозитории лежит только shifts.example.json.
 scripts/shifts.json
 
+# Норма нагрузки — ваше число, ваш замер и автор решения.
+# В репозитории лежит только load_reference.example.json.
+scripts/load_reference.json
+
 # Локальные прогоны/вывод отчётов
 *_report.json
 *_render.md

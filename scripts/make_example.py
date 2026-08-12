@@ -231,6 +231,13 @@ def build_report():
     # Настройки установки прибиваем к стенду: образец должен собираться
     # одинаково в любой копии проекта, а не наследовать локальные файлы.
     load_baseline.DATA_START = None
+    # Норма нагрузки — настройка установки: где-то задана, где-то нет.
+    # Прибиваем к стенду, иначе образец собирался бы по-разному в разных
+    # копиях и selftest ловил бы мнимое устаревание.
+    load_baseline.load_reference = lambda path=None: {
+        "value": 7.5, "normal_from": 6.5, "normal_to": 9.0,
+        "decided": "2026-08-12", "by": "руководитель",
+        "measured_on": "четыре полные недели", "note": None}
     shifts.load_config = lambda path=None: {"share_threshold": 0.30,
                                             "min_day_cases": 10,
                                             "exclude_staff": [], "overrides": {}}

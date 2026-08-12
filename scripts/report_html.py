@@ -229,10 +229,15 @@ def _load_card(load):
     if not load:
         return ""
     if not load.get("available"):
+        ref = _reference_html(load.get("reference"))
+        tail = ("Проценты выше от этого не меняются, но контекста «поток был "
+                "обычный или нет» у отчёта пока нет.")
+        if ref:
+            tail = ("Это про сравнение с недавним прошлым; на вопрос «тяжёлый ли "
+                    "период вообще» отвечает норма ниже.")
         return ("<div class=card><h2>Нагрузка</h2>"
                 f"<p class=hint>Сравнивать не с чем — {_esc(load.get('reason'))}. "
-                "Проценты выше от этого не меняются, но контекста «поток был "
-                "обычный или нет» у отчёта пока нет.</p></div>")
+                f"{tail}</p>{ref}</div>")
     lpo = load.get("load_per_operator") or {}
     vs_week = (load.get("vs_last_week") or {}).get("ratio")
     extra = f", x{_esc(vs_week)} к последней неделе базы" if vs_week else ""
@@ -247,7 +252,34 @@ def _load_card(load):
             f"{extra}).</p>"
             f"<p class=hint>{_esc(lpo.get('cases_per_work_hour'))} обращений/час на "
             f"{_esc(load['online_staff'])} оператора в окно "
-            f"{_esc(lpo.get('work_window'))}.</p>{note}</div>")
+            f"{_esc(lpo.get('work_window'))}.</p>{note}"
+            f"{_reference_html(load.get('reference'))}</div>")
+
+
+def _reference_html(ref):
+    """Норма нагрузки — тот же блок, что в чат-рендере (паритет обязателен).
+
+    Отдельным абзацем от скользящей базы: она отвечает «необычен ли поток
+    относительно недавнего», норма — «тяжёлый ли период вообще».
+    """
+    if not ref:
+        return ""
+    corridor = ""
+    if ref.get("normal_from") is not None and ref.get("normal_to") is not None:
+        corridor = f" (обычно {_esc(ref['normal_from'])}–{_esc(ref['normal_to'])})"
+    verdict = (f" → период <b>{_esc(ref['verdict'])}</b>" if ref.get("verdict")
+               else f" → x{_esc(ref['ratio'])} к норме")
+    out = (f"<p>Против нормы: <b>{_esc(ref['actual'])}</b> обращений/час на "
+           f"оператора при норме <b>{_esc(ref['value'])}</b>{corridor}{verdict}.</p>")
+    who = ", ".join(x for x in (ref.get("by"), ref.get("decided")) if x)
+    if who:
+        measured = f"; замер {_esc(ref['measured_on'])}" if ref.get("measured_on") else ""
+        out += f"<p class=hint>Норму задал {_esc(who)}{measured}.</p>"
+    if ref.get("short_period"):
+        out += (f"<p class=hint>Период короче {ref['short_period_days']:.0f} дней: "
+                "на коротком окне состав дней недели перекашивает нагрузку, "
+                "вердикт ориентировочный.</p>")
+    return out
 
 
 def _backlog_card(b):

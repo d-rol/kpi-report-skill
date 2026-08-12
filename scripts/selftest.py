@@ -45,6 +45,7 @@ import shifts
 import calibration
 import load_baseline as lb
 import report
+import report_html
 import audit_critical
 import topics
 import settings
@@ -314,6 +315,14 @@ section("Контекст нагрузки в отчёте")
 # и в разных установках разный. Прибиваем его к стенду — иначе тест мерил бы не
 # механизм, а чужие настройки.
 shifts.load_config = lambda path=None: dict(CFG)
+# Норма нагрузки — тоже настройка установки (по умолчанию её нет вовсе).
+# Прибиваем к стенду по той же причине: тест обязан мерить механизм, а не
+# чужой конфиг. Сам механизм нормы проверяется отдельной секцией ниже.
+REF = {"value": 7.5, "normal_from": 6.5, "normal_to": 9.0,
+       "decided": "2026-08-12", "by": "руководитель",
+       "measured_on": "четыре полные недели", "note": None}
+REAL_LOAD_REFERENCE = lb.load_reference          # для проверки самого чтения
+lb.load_reference = lambda path=None: dict(REF)
 
 lb_cases = steady_cases(dt.datetime(2026, 6, 25, tzinfo=MSK), 40, per_day=12)
 
@@ -353,6 +362,67 @@ check("нагрузки нет (personal): строк нет", report.load_lines
 check("пометка всплеска", report.spike_note({"spike_ratio": 2.4}),
       " · час всплеска x2.4")
 check("без всплеска — пусто", report.spike_note({"held_min": 40}), "")
+
+# --------------------------------------------------------------------------
+section("Норма нагрузки (фиксированный референс)")
+# --------------------------------------------------------------------------
+# Норма отвечает на вопрос, на который скользящая база не отвечает по
+# устройству: «тяжёлый ли период ВООБЩЕ». Проверяем механизм, а не число из
+# конкретной установки — значение в конфиге у каждой копии своё (REF выше).
+check("выше коридора — загруженный", lb.assess(9.6, ref=REF)["verdict"], "загруженный")
+check("ниже коридора — спокойный", lb.assess(6.0, ref=REF)["verdict"], "спокойный")
+# Границы включительно: на самой границе период ещё обычный, иначе ровно
+# нормальная неделя читалась бы как перегруз.
+check("верхняя граница — ещё обычный", lb.assess(9.0, ref=REF)["verdict"], "обычный")
+check("нижняя граница — ещё обычный", lb.assess(6.5, ref=REF)["verdict"], "обычный")
+check("отношение к норме", lb.assess(9.0, ref=REF)["ratio"], 1.2)
+
+# Короткий период сравнивать можно, но молча нельзя: на двух-трёх днях состав
+# дней недели перевешивает сам сигнал.
+check("короткий период помечен", lb.assess(7.5, days=3, ref=REF)["short_period"], True)
+check("двухнедельный период не помечен",
+      lb.assess(7.5, days=14, ref=REF)["short_period"], False)
+
+# Дальше проверяется само чтение конфига, поэтому подмену снимаем: со стендовой
+# заглушкой эти проверки мерили бы её, а не файл.
+lb.load_reference = REAL_LOAD_REFERENCE
+
+# Нормы нет — молчим, а не подставляем ноль или «обычный».
+check("нормы нет — вердикта нет", lb.assess(7.5,
+      path=os.path.join(tempfile.gettempdir(), "нет-такого-файла.json")), None)
+check("нормы нет — строк в отчёте нет", report.reference_lines(None), [])
+
+# Число берётся ИЗ КОНФИГА, а не выводится из данных. Значение в файле нарочно
+# не совпадает ни с одной константой кода: если бы норма где-то вычислялась,
+# именно это число и не сошлось бы.
+with tempfile.TemporaryDirectory() as _tmp:
+    _p = os.path.join(_tmp, "load_reference.json")
+    with open(_p, "w", encoding="utf-8") as _f:
+        json.dump({"cases_per_operator_hour": 8.25, "normal_from": 7.0,
+                   "normal_to": 9.75, "decided": "2026-01-02", "by": "тест"}, _f)
+    _ref = lb.load_reference(_p)
+    check("норма прочитана из файла как есть", _ref["value"], 8.25)
+    check("коридор прочитан из файла", (_ref["normal_from"], _ref["normal_to"]),
+          (7.0, 9.75))
+    check("автор и дата решения сохранены", (_ref["by"], _ref["decided"]),
+          ("тест", "2026-01-02"))
+    check("норма из файла даёт вердикт",
+          lb.assess(9.9, ref=_ref)["verdict"], "загруженный")
+    check("значение из файла не подменяется кодом",
+          lb.assess(8.25, ref=_ref)["ratio"], 1.0)
+
+lb.load_reference = lambda path=None: dict(REF)   # обратно к стенду
+
+# Паритет рендеров: страница обещает «ту же информацию», что и чат. Разойдись
+# они — норма молча пропала бы из того вывода, который чаще пересылают.
+_a = lb.assess(9.6, days=14, ref=REF)
+_chat = "\n".join(report.reference_lines(_a))
+_html = report_html._reference_html(_a)
+check("норма в чат-рендере", "загруженный" in _chat and "7.5" in _chat, True)
+check("норма в HTML-рендере", "загруженный" in _html and "7.5" in _html, True)
+check("автор решения назван в обоих",
+      ("руководитель" in _chat, "руководитель" in _html), (True, True))
+check("HTML без нормы — пусто", report_html._reference_html(None), "")
 
 # --------------------------------------------------------------------------
 section("Аудит критичных: сам взял или чат упал")

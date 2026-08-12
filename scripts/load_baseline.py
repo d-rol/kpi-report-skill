@@ -44,11 +44,36 @@ API мы не идём вовсе.
 аккаунта в разы ниже текущего, а роста бизнеса в разы не было — это переезд, а
 не рост.
 
+Про фиксированную норму (load_reference.json)
+---------------------------------------------
+Скользящая база отвечает на вопрос «необычен ли поток ОТНОСИТЕЛЬНО НЕДАВНЕГО» и
+по устройству не может ответить на вопрос «тяжёлый ли период вообще»: она
+каждый раз перенормируется на последние недели, поэтому две тяжёлые недели
+подряд назовёт обычными. Второй вопрос закрывает фиксированная норма — число
+«столько обращений в час на оператора это обычно», лежащее в конфиге.
+
+Норма не выводится из данных на лету СОЗНАТЕЛЬНО: референс, который сам себя
+пересчитывает по последним неделям, — это то же скользящее среднее, от которого
+мы уходим. Число ставит руководитель, оно хранится с датой и автором решения
+(как переопределения грации в `calibration.json`), а пересмотр — это новый
+замер и новая запись, а не автоматика.
+
+Нормы по умолчанию нет: она зависит от вашего потока и числа операторов, и
+подставить сюда чужую цифру было бы хуже, чем не иметь никакой. Как получить
+свою: возьмите 4 полные недели пригодных данных, посчитайте нагрузку на
+оператора по дням (этот хелпер печатает её строкой «нагрузка на оператора»),
+возьмите медиану и квартили — медиана даёт норму, квартили коридор. Пока файла
+нет, отчёт просто молчит про норму и остаётся при скользящей базе.
+
+Оба механизма остаются рядом: база нужна ещё и для пометки часов всплеска у
+критичных случаев.
+
 Запуск:
   python load_baseline.py --weeks 4 --cache
   python load_baseline.py --from "2026-07-12 00:00:00" --to "2026-07-18 23:59:59" --weeks 4 --cache
   python load_baseline.py --from "..." --to "..." --json
 """
+import os
 import sys
 import json
 import argparse
@@ -87,6 +112,90 @@ DEFAULT_BASELINE_WEEKS = 4
 # месте, поэтому одного отношения мало.
 SPIKE_MIN_CASES = 5
 SPIKE_RATIO = 1.5
+# Короче этого периода сравнение с нормой ещё считается, но с оговоркой вслух:
+# на двух-трёх днях состав дней недели перевешивает сам сигнал (у типовой
+# поддержки будни и выходные различаются в полтора раза).
+SHORT_PERIOD_DAYS = 7.0
+
+# Фиксированная норма нагрузки — в конфиге, а не в коде: она money-adjacent,
+# число ставит руководитель и оно хранится с датой и автором решения.
+# Образец: load_reference.example.json.
+CONFIG_NAME = "load_reference.json"
+
+
+def reference_path(path=None):
+    return path or os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_NAME)
+
+
+def load_reference(path=None):
+    """Фиксированная норма «сколько обращений в час на оператора — это обычно».
+
+    Отсутствие файла — не ошибка, а обычное состояние свежей установки: нормы
+    нет, пока её не измерили и не утвердили. Тогда отчёт про норму молчит и
+    остаётся при скользящей базе, которая отвечает на другой вопрос. Молчание
+    здесь ничего не искажает: строка нагрузки и без нормы не утверждает, что
+    период обычный, — в отличие от молчания про саму базу.
+    """
+    p = reference_path(path)
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        cfg = json.load(f)
+    value = cfg.get("cases_per_operator_hour")
+    if value is None:
+        return None
+    return {
+        "value": float(value),
+        "normal_from": _opt_float(cfg.get("normal_from")),
+        "normal_to": _opt_float(cfg.get("normal_to")),
+        "decided": cfg.get("decided"),
+        "by": cfg.get("by"),
+        "measured_on": cfg.get("measured_on"),
+        "note": cfg.get("note"),
+    }
+
+
+def _opt_float(v):
+    return None if v is None else float(v)
+
+
+def assess(cases_per_work_hour, days=None, ref=None, path=None):
+    """Период против фиксированной нормы: тяжёлый он вообще или обычный.
+
+    Сравнение — по периоду ЦЕЛИКОМ, а не по каждому дню. Разброс по дню недели
+    в поддержке обычно в районе полутора раз, и подённое сравнение сделало бы
+    середину недели вечным перегрузом, а выходные вечным простоем: метрика
+    превратилась бы в календарь.
+
+    Вердикт ничего не вычитает и никого не оправдывает — как и пометка всплеска,
+    он контекст для руководителя.
+    """
+    ref = ref if ref is not None else load_reference(path)
+    if not ref or cases_per_work_hour is None:
+        return None
+    lo, hi = ref["normal_from"], ref["normal_to"]
+    verdict = None
+    if lo is not None and hi is not None:
+        # Границы коридора включительно: на самой границе период ещё обычный.
+        verdict = ("загруженный" if cases_per_work_hour > hi else
+                   "спокойный" if cases_per_work_hour < lo else "обычный")
+    return {
+        "actual": round(cases_per_work_hour, 2),
+        "value": ref["value"],
+        "normal_from": lo,
+        "normal_to": hi,
+        "ratio": (round(cases_per_work_hour / ref["value"], 2)
+                  if ref["value"] else None),
+        "verdict": verdict,
+        "decided": ref["decided"],
+        "by": ref["by"],
+        "measured_on": ref["measured_on"],
+        "note": ref["note"],
+        # Короткий период сравнить с нормой можно, но сказать об этом надо:
+        # тихое сравнение выдало бы календарный перекос за нагрузку.
+        "short_period": bool(days is not None and days < SHORT_PERIOD_DAYS),
+        "short_period_days": SHORT_PERIOD_DAYS,
+    }
 
 
 def bucket_key(weekday, hour):
@@ -281,6 +390,25 @@ def _growth(by_week, week_days, min_days=2.0):
     return round(rates[-1] / rates[0], 2)
 
 
+def load_per_operator(total, occ, online):
+    """Абсолютная нагрузка: обращений в час на одного оператора.
+
+    Вынесено из compare(), потому что этой величине база не нужна — она меряет
+    сам период. Именно её сравнивают с фиксированной нормой, и считаться она
+    обязана одним способом в обоих случаях: разойдись формулы, отчёт с базой и
+    отчёт без базы дали бы разные «обращений/час» на одних и тех же данных.
+    """
+    online = online or 1
+    hours_span = sum(occ.values()) or 1
+    work_hours = sum(n for (wd, h), n in occ.items() if WORK_START <= h < WORK_END) or 1
+    work_actual = sum(c for (wd, h), c in total.items() if WORK_START <= h < WORK_END)
+    return {
+        "cases_per_work_hour": round(work_actual / work_hours / online, 2),
+        "cases_per_hour_overall": round(sum(total.values()) / hours_span / online, 2),
+        "work_window": f"{WORK_START}:00–{WORK_END}:00 МСК",
+    }
+
+
 def compare(client, from_time, to_time, baseline):
     """Факт периода против базы: сколько ожидали, сколько пришло, где всплески."""
     start = dt.datetime.strptime(from_time, FMT).replace(tzinfo=MSK)
@@ -323,10 +451,6 @@ def compare(client, from_time, to_time, baseline):
             })
     spikes.sort(key=lambda x: -x["ratio"])
 
-    hours_span = sum(occ.values()) or 1
-    work_hours = sum(n for (wd, h), n in occ.items() if WORK_START <= h < WORK_END) or 1
-    work_actual = sum(c for (wd, h), c in total.items() if WORK_START <= h < WORK_END)
-
     # При растущем потоке сравнение со средним за 4 недели малоинформативно —
     # рядом даём сравнение с последней неделей базы, приведённое к длине периода.
     days = max(1e-9, (end - start).total_seconds() / 86400.0)
@@ -343,11 +467,7 @@ def compare(client, from_time, to_time, baseline):
             "expected_cases": round(exp_last_week, 1),
             "ratio": round(actual / exp_last_week, 2) if exp_last_week else None,
         },
-        "load_per_operator": {
-            "cases_per_work_hour": round(work_actual / work_hours / online, 2),
-            "cases_per_hour_overall": round(actual / hours_span / online, 2),
-            "work_window": f"{WORK_START}:00–{WORK_END}:00 МСК",
-        },
+        "load_per_operator": load_per_operator(total, occ, online),
         "by_weekday": {WD_NAMES[wd]: {"actual": v["actual"], "expected": round(v["expected"], 1)}
                        for wd, v in sorted(by_day.items())},
         "by_hour": {h: {"actual": v["actual"], "expected": round(v["expected"], 1)}
@@ -393,7 +513,7 @@ def context(client, from_time, to_time, weeks=DEFAULT_BASELINE_WEEKS, since=None
     baseline = build_baseline(client, end, weeks=weeks, since=since)
     win = baseline["window"]
     if win["insufficient"]:
-        return {
+        out = {
             "available": False,
             "reason": ("весь период раньше начала пригодных данных"
                        if win["collapsed"] else
@@ -402,6 +522,24 @@ def context(client, from_time, to_time, weeks=DEFAULT_BASELINE_WEEKS, since=None
             "data_start": win["data_start"],
             "baseline_days": win["effective_days"],
         }
+        # Норме история не нужна: она меряет период абсолютной величиной, а не
+        # сравнивает с недавним прошлым. Поэтому «базы нет» ещё не значит «про
+        # нагрузку сказать нечего» — но только если сам период лежит внутри
+        # пригодных данных: на данных постепенного переезда абсолютная цифра
+        # была бы артефактом ровно так же, как мнимый рост потока.
+        p_start = dt.datetime.strptime(from_time, FMT).replace(tzinfo=MSK)
+        p_end = dt.datetime.strptime(to_time, FMT).replace(tzinfo=MSK)
+        limit = since or DATA_START
+        if load_reference() and (limit is None or p_start >= limit):
+            online, online_note, _ = resolve_online(client, baseline, from_time, to_time)
+            total, _, _, _ = _collect(client, p_start, p_end)
+            lpo = load_per_operator(total, _bucket_occurrences(p_start, p_end), online)
+            days = max(0.0, (p_end - p_start).total_seconds() / 86400.0)
+            out["online_staff"] = online
+            out["online_note"] = online_note
+            out["load_per_operator"] = lpo
+            out["reference"] = assess(lpo["cases_per_work_hour"], days=days)
+        return out
 
     online, online_note, _ = resolve_online(client, baseline, from_time, to_time)
     baseline["online_staff"] = online
@@ -418,6 +556,9 @@ def context(client, from_time, to_time, weeks=DEFAULT_BASELINE_WEEKS, since=None
         "ratio": cmp_["ratio"],
         "vs_last_week": cmp_["vs_last_week"],
         "load_per_operator": cmp_["load_per_operator"],
+        # Второй, независимый от базы ответ: «тяжёлый ли период вообще».
+        "reference": assess(cmp_["load_per_operator"]["cases_per_work_hour"],
+                            days=cmp_["period"]["days"]),
         # Ключи «Пн-14» — по ним отчёт помечает критичные случаи, попавшие
         # в час всплеска. Формат тот же, что у bucket_key.
         "spike_buckets": {bucket_key(WD_NAMES.index(s["weekday"]), s["hour"]): s["ratio"]
@@ -562,6 +703,24 @@ def main():
     lpo = cmp_["load_per_operator"]
     print(f"  нагрузка на оператора: {lpo['cases_per_work_hour']} обращений/час "
           f"в рабочее окно {lpo['work_window']}")
+
+    ref = assess(lpo["cases_per_work_hour"], days=cmp_["period"]["days"])
+    if ref:
+        corridor = (f" (обычно {ref['normal_from']}–{ref['normal_to']})"
+                    if ref["normal_from"] is not None and ref["normal_to"] is not None
+                    else "")
+        print(f"  против нормы {ref['value']}{corridor}: период "
+              + (ref["verdict"] or f"x{ref['ratio']} к норме"))
+        who = ", ".join(x for x in (ref.get("by"), ref.get("decided")) if x)
+        if who:
+            print(f"    норму задал {who}"
+                  + (f"; замер {ref['measured_on']}" if ref.get("measured_on") else ""))
+        if ref["short_period"]:
+            print(f"    ⓘ период короче {ref['short_period_days']:.0f} дней — "
+                  "состав дней недели перекашивает нагрузку, вердикт ориентировочный")
+    else:
+        print("  фиксированной нормы нет — на вопрос «тяжёлый ли период вообще» "
+              f"отчёт не отвечает (задать: {CONFIG_NAME})")
 
     print("\nПо дням недели (факт / ожидание):")
     peak = max((v["actual"] for v in cmp_["by_weekday"].values()), default=0)
