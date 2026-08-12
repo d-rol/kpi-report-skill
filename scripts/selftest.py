@@ -53,6 +53,7 @@ import no_responsible
 import sla_violations
 import backlog
 import setup_check
+import ref_probe
 
 MSK = lb.MSK
 FAILED = []
@@ -425,6 +426,46 @@ check("автор решения назван в обоих",
 check("HTML без нормы — пусто", report_html._reference_html(None), "")
 
 # --------------------------------------------------------------------------
+section("Замер нормы (ref_probe)")
+# --------------------------------------------------------------------------
+# Замер money-adjacent: по его числам ставят норму, по норме читают работу
+# людей. Проверяем два свойства — что он считает нагрузку с делителем смен и
+# что он ОТКАЗЫВАЕТСЯ предлагать число на коротком окне.
+_days = [dt.date(2026, 7, 15) + dt.timedelta(days=i) for i in range(28)]
+_per_day = {d: 120 for d in _days}
+# 84 обращения в 12 рабочих часов = 7.0 в час на одного оператора.
+_per_day_work = {d: 84 for d in _days}
+_one = {d.strftime("%Y-%m-%d"): 1 for d in _days}
+_sm = ref_probe.summarize(_per_day, _per_day_work, _one)
+check("замер: дней в окне", _sm["days"], 28)
+check("замер: нагрузка на оператора", _sm["load"]["median"], 7.0)
+check("замер: полных недель четыре", len(_sm["weeks"]), 4)
+# Двойная смена делит нагрузку — иначе день с двумя операторами читался бы как
+# вдвое более тяжёлый, чем он есть.
+_two = {d.strftime("%Y-%m-%d"): 2 for d in _days}
+check("замер: делитель смен применяется",
+      ref_probe.summarize(_per_day, _per_day_work, _two)["load"]["median"], 3.5)
+
+# Правило округления: значение — середина медианы и среднего, до 0.5; коридор —
+# квартили наружу до 0.5.
+_stub = {"days": 28,
+         "load": {"median": 7.17, "mean": 7.63, "q25": 6.58, "q75": 8.92},
+         "weeks": [{"from": "a", "to": "b", "load": v}
+                   for v in (6.96, 9.05, 6.99, 7.54)]}
+_pr = ref_probe.suggest(_stub)
+check("предложение: значение округлено до 0.5", _pr["value"], 7.5)
+check("предложение: коридор наружу до 0.5",
+      (_pr["normal_from"], _pr["normal_to"]), (6.5, 9.0))
+# Проверка предложения на той же истории: коридор, красящий больше половины
+# недель, — это шум, а не сигнал, и об этом надо знать ДО записи в конфиг.
+check("предложение: сколько недель пометит", _pr["weeks_flagged"], 1)
+
+# Главное свойство: на коротком окне числа печатаются, а предложения нет.
+check("короткое окно: предложения нет",
+      ref_probe.suggest({"days": 21, "load": _stub["load"], "weeks": []}), None)
+check("данных нет: замер не падает", ref_probe.summarize({}, {}, {}), None)
+
+# --------------------------------------------------------------------------
 section("Аудит критичных: сам взял или чат упал")
 # --------------------------------------------------------------------------
 # Омнидеск пишет одно и то же событие `fixed_chat 0 -> оператор` и когда чат
@@ -678,7 +719,7 @@ NOT_SETTINGS = {"MSK", "MSK_TZ", "FMT", "WD_NAMES", "CONFIG_NAME", "ASSIGN_EVENT
                 "OK", "ASK", "LOOK"}
 missed = []
 for mod in (sla_violations, audit_critical, lb, shifts, calibration, topics,
-            no_responsible, setup_check):
+            no_responsible, setup_check, ref_probe):
     for name in dir(mod):
         if not name.isupper() or name in NOT_SETTINGS:
             continue

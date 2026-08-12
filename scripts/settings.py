@@ -32,6 +32,7 @@ except AttributeError:
 import shifts
 import topics
 import report
+import ref_probe
 import calibration
 import load_baseline
 import no_responsible
@@ -106,6 +107,13 @@ GROUPS = [
         (load_baseline, "SHORT_PERIOD_DAYS", "суток",
          "Короче этого периода сравнение с нормой сопровождается оговоркой: на "
          "двух-трёх днях состав дней недели перевешивает сам сигнал.",
+         DERIVED),
+    ]),
+    ("Замер нормы (ref_probe.py)", [
+        (ref_probe, "MIN_PROBE_DAYS", "суток",
+         "Минимум данных, при котором замер вообще предлагает норму. Меньше — "
+         "печатает числа, но предложения не даёт: недельный разброс на одном-двух "
+         "наблюдениях не оценивается, а только кажется маленьким.",
          DERIVED),
     ]),
     ("График смен (делитель нагрузки)", [
